@@ -321,3 +321,45 @@ def main():
 
 if __name__ == "__main__":
     main()
+import os
+import time
+import requests
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from tronpy import Tron
+from tronpy.keys import PrivateKey
+import telegram
+
+# =========================
+# SAFETY CHECK FOR GITHUB ACTIONS
+# =========================
+REQUIRED_ENV_VARS = ["TRONGRID_API_KEY", "TRONSCAN_API_KEY", "PRIVATE_KEY", "TELEGRAM_TOKEN", "CHAT_ID"]
+missing_vars = [var for var in REQUIRED_ENV_VARS if not os.getenv(var) or os.getenv(var).startswith("YOUR_")]
+if missing_vars:
+    print(f"❌ CRITICAL ERROR: Missing or unreplaced environment variables: {', '.join(missing_vars)}")
+    print("➡️ Please add these to your GitHub Repository > Settings > Secrets and variables > Actions")
+    exit(1)
+
+# =========================
+# SETTINGS (Now pulled from Environment Variables)
+# =========================
+TRONGRID_URL = "https://api.trongrid.io"
+TRONSCAN_URL = "https://apilist.tronscanapi.com"
+USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+
+MIN_BALANCE_USD = 500
+MIN_TRANSFER_USD = 150
+REQUIRED_TRANSFERS = 2
+WINDOW_DAYS = 7
+
+# Pulled securely from GitHub Secrets
+TRONGRID_API_KEY = os.getenv("TRONGRID_API_KEY")
+TRONSCAN_API_KEY = os.getenv("TRONSCAN_API_KEY")
+PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+
+# Initialize Telegram bot
+telegram_bot = telegram.Bot(token=TELEGRAM_TOKEN)
+
+# ... [KEEP THE REST OF THE FUNCTIONS EXACTLY AS PROVIDED IN THE PREVIOUS CORRECTED CODE] ...
