@@ -3,8 +3,9 @@ import time
 import requests
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from tronpy import Tron  # Ensure tronpy is installed
-import telegram  # Ensure python-telegram-bot is installed
+from tronpy import Tron
+from tronpy.keys import PrivateKey  # REQUIRED for signing transactions
+import telegram
 
 # =========================
 # SETTINGS
@@ -15,17 +16,17 @@ TRONSCAN_URL = "https://apilist.tronscanapi.com"
 USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 
 # Thresholds and settings
-MIN_BALANCE_USD = 500  # Minimum wallet balance required
-MIN_TRANSFER_USD = 150  # Minimum transfer amount to qualify
-REQUIRED_TRANSFERS = 2   # Number of qualifying transfers required
-WINDOW_DAYS = 7          # Look back period in days
+MIN_BALANCE_USD = 500
+MIN_TRANSFER_USD = 150
+REQUIRED_TRANSFERS = 2
+WINDOW_DAYS = 7
 
 # API Keys and Secrets
-TRONGRID_API_KEY = "YOUR_TRONGRID_API_KEY"  # Replace with your TRON Grid API key
-TRONSCAN_API_KEY = "YOUR_TRONSCAN_API_KEY"  # Replace with your TRON Scan API key
-PRIVATE_KEY = "YOUR_PRIVATE_KEY"              # Replace with your TRON wallet private key
-TELEGRAM_TOKEN = "8874535199:AAFMTgsh3G-U3GHNm2jiukeMzBV8SC7VFUk"  # Your Telegram bot token
-CHAT_ID = "YOUR_CHAT_ID"                      # Replace with your Telegram chat ID
+TRONGRID_API_KEY = "YOUR_TRONGRID_API_KEY"
+TRONSCAN_API_KEY = "YOUR_TRONSCAN_API_KEY"
+PRIVATE_KEY = "YOUR_PRIVATE_KEY"              # Hex string, with or without '0x'
+TELEGRAM_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+CHAT_ID = "YOUR_CHAT_ID"
 
 # Initialize Telegram bot
 telegram_bot = telegram.Bot(token=TELEGRAM_TOKEN)
@@ -36,13 +37,17 @@ telegram_bot = telegram.Bot(token=TELEGRAM_TOKEN)
 
 def trongrid_get(path, params=None):
     headers = {}
-    if TRONGGRID_API_KEY:
+    if TRONGRID_API_KEY:
         headers["TRON-PRO-API-KEY"] = TRONGRID_API_KEY
 
     url = TRONGRID_URL + path
-    response = requests.get(url, params=params or {}, headers=headers, timeout=30)
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = requests.get(url, params=params or {}, headers=headers, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching from TRON Grid: {e}")
+        return None
 
 def tronscan_get(path, params=None):
     headers = {}
@@ -50,9 +55,13 @@ def tronscan_get(path, params=None):
         headers["TRON-PRO-API-KEY"] = TRONSCAN_API_KEY
 
     url = TRONSCAN_URL + path
-    response = requests.get(url, params=params or {}, headers=headers, timeout=30)
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = requests.get(url, params=params or {}, headers=headers, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching from TRON Scan: {e}")
+        return None
 
 # =========================
 # TRON ACCOUNT DATA
@@ -60,6 +69,8 @@ def tronscan_get(path, params=None):
 
 def get_account(address):
     data = trongrid_get(f"/v1/accounts/{address}", {"only_confirmed": "true"})
+    if data is None:
+        return None
     accounts = data.get("data", [])
     return accounts[0] if accounts else None
 
@@ -72,15 +83,19 @@ def get_trx_balance(address):
 
 def get_usdt_balance(address):
     data = trongrid_get(f"/v1/accounts/{address}/trc20/balance", {
-        "only_confirmed": "true",
         "contract_address": USDT_CONTRACT
     })
-    if isinstance(data, dict):
-        if "data" in data and isinstance(data["data"], list) and data["data"]:
-            item = data["data"][0]
-            value = item.get("balance", item.get("amount", 0))
-            return int(value) / 1_000_000 if value else 0
-    return 0
+    if data is None or not data.get("success"):
+        return 0
+    
+    data_list = data.get("data", [])
+    if not data_list:
+        return 0
+    
+    # The API returns a list of dicts like: [{"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t": "150000000"}]
+    item = data_list[0]
+    balance_str = item.get(USDT_CONTRACT, "0")
+    return int(balance_str) / 1_000_000
 
 # =========================
 # USDT TRANSFERS
@@ -103,6 +118,9 @@ def get_usdt_transfers(address, start_ms, end_ms):
             params["fingerprint"] = fingerprint
 
         data = trongrid_get(f"/v1/accounts/{address}/transactions/trc20", params)
+        if data is None:
+            break
+
         rows = data.get("data", [])
         for row in rows:
             try:
@@ -115,7 +133,8 @@ def get_usdt_transfers(address, start_ms, end_ms):
                     "token": "USDT",
                     "timestamp": row.get("block_timestamp", 0)
                 })
-            except Exception:
+            except Exception as e:
+                print(f"Error processing transfer row: {e}")
                 continue
 
         meta = data.get("meta", {})
@@ -138,10 +157,14 @@ def check_wallet(address):
 
     trx_balance = get_trx_balance(address)
     usdt_balance = get_usdt_balance(address)
-    current_usd_balance = usdt_balance + (trx_balance * 1)  # Assuming TRX is approximately $1 for simplicity
+    
+    # FIX: TRX is not $1. Using a realistic estimate (~$0.25) to prevent false positives.
+    # For production, consider fetching the live TRX/USD price via an API like CoinGecko.
+    trx_price_usd = 0.25
+    current_usd_balance = usdt_balance + (trx_balance * trx_price_usd)
 
     if current_usd_balance < MIN_BALANCE_USD:
-        print("Wallet does not meet the balance requirement.")
+        print(f"Wallet does not meet the balance requirement. Balance: ${current_usd_balance:.2f}")
         return False
 
     transfers = get_usdt_transfers(address, start_ms, end_ms)
@@ -175,7 +198,7 @@ def discover_recent_trx_transfers(start_ms, end_ms, limit=50):
         "token": "_"
     }
     data = tronscan_get("/api/transfer", params)
-    return data.get("data", [])
+    return data.get("data", []) if data else []
 
 def discover_recent_usdt_transfers(start_ms, end_ms, limit=50):
     params = {
@@ -187,7 +210,7 @@ def discover_recent_usdt_transfers(start_ms, end_ms, limit=50):
         "contract_address": USDT_CONTRACT
     }
     data = tronscan_get("/api/token_trc20/transfers", params)
-    return data.get("data", [])
+    return data.get("data", []) if data else []
 
 # =========================
 # SEND TRANSACTION
@@ -195,23 +218,56 @@ def discover_recent_usdt_transfers(start_ms, end_ms, limit=50):
 
 def send_transaction(to_address, amount, token='TRX'):
     tron = Tron()
-    tron.private_key = PRIVATE_KEY
+    
+    # Clean the private key string (remove '0x' if present) and convert to bytes
+    clean_pk = PRIVATE_KEY.replace('0x', '').replace('0X', '')
+    try:
+        priv_key = PrivateKey(bytes.fromhex(clean_pk))
+    except Exception as e:
+        print(f"Invalid private key format: {e}")
+        return None
+        
+    from_address = priv_key.public_key.to_base58check_address()
 
-    if token == 'TRX':
-        txn = tron.trx.transfer(to_address, amount)
-    elif token == 'USDT':
-        txn = tron.trx.contract(USDT_CONTRACT).transfer(to_address, amount)
+    try:
+        if token == 'TRX':
+            # amount is in TRX, convert to SUN (1 TRX = 1,000,000 SUN)
+            amount_sun = int(amount * 1_000_000)
+            txn = (
+                tron.trx.transfer(from_address, to_address, amount_sun)
+                .build()
+                .sign(priv_key)
+            )
+        elif token == 'USDT':
+            # amount is in USDT, convert to smallest unit (6 decimals)
+            amount_unit = int(amount * 1_000_000)
+            contract = tron.get_contract(USDT_CONTRACT)
+            txn = (
+                contract.functions.transfer(to_address, amount_unit)
+                .with_owner(from_address)
+                .fee_limit(100_000_000)  # 100 TRX fee limit (adjust as needed)
+                .build()
+                .sign(priv_key)
+            )
+        else:
+            print(f"Unsupported token: {token}")
+            return None
 
-    txn.sign()
-    result = txn.broadcast()
-    return result
+        result = txn.broadcast()
+        return result
+    except Exception as e:
+        print(f"Error sending transaction to {to_address}: {e}")
+        return None
 
 # =========================
 # SEND TELEGRAM ALERT
 # =========================
 
 def send_telegram_alert(message):
-    telegram_bot.send_message(chat_id=CHAT_ID, text=message)
+    try:
+        telegram_bot.send_message(chat_id=CHAT_ID, text=message)
+    except Exception as e:
+        print(f"Error sending Telegram message: {e}")
 
 # =========================
 # MAIN
@@ -224,39 +280,44 @@ def main():
     start_ms = int(start_date.timestamp() * 1000)
 
     while True:
-        # Discover wallets and check conditions
-        print("Discovering recent TRX transfers...")
-        trx_transfers = discover_recent_trx_transfers(start_ms, int(datetime.now(timezone.utc).timestamp() * 1000))
-        print(f"TRX transfers discovered: {len(trx_transfers)}")
+        try:
+            print("Discovering recent TRX transfers...")
+            trx_transfers = discover_recent_trx_transfers(start_ms, int(datetime.now(timezone.utc).timestamp() * 1000))
+            print(f"TRX transfers discovered: {len(trx_transfers)}")
 
-        print("Discovering recent USDT transfers...")
-        usdt_transfers = discover_recent_usdt_transfers(start_ms, int(datetime.now(timezone.utc).timestamp() * 1000))
-        print(f"USDT transfers discovered: {len(usdt_transfers)}")
+            print("Discovering recent USDT transfers...")
+            usdt_transfers = discover_recent_usdt_transfers(start_ms, int(datetime.now(timezone.utc).timestamp() * 1000))
+            print(f"USDT transfers discovered: {len(usdt_transfers)}")
 
-        candidates = set()
-        for tx in trx_transfers:
-            to_address = tx.get("to")
-            if to_address:
-                candidates.add(to_address)
+            candidates = set()
+            for tx in trx_transfers:
+                to_address = tx.get("to")
+                if to_address:
+                    candidates.add(to_address)
 
-        for tx in usdt_transfers:
-            to_address = tx.get("to") or tx.get("toAddress") or tx.get("to_address")
-            if to_address:
-                candidates.add(to_address)
+            for tx in usdt_transfers:
+                to_address = tx.get("to") or tx.get("toAddress") or tx.get("to_address")
+                if to_address:
+                    candidates.add(to_address)
 
-        print(f"Candidate wallets discovered: {len(candidates)}")
+            print(f"Candidate wallets discovered: {len(candidates)}")
 
-        for address in candidates:
-            try:
-                if check_wallet(address):
-                    # Send a transaction of 0.011 TRX to the matching address
-                    transaction_result = send_transaction(address, 0.011, token='TRX')
-                    send_telegram_alert(f"QUALIFIED WALLET\nWallet: {address}\nTransaction Result: {transaction_result}")
-            except Exception as e:
-                print(f"Error checking {address}: {e}")
+            for address in candidates:
+                try:
+                    if check_wallet(address):
+                        # Send a transaction of 0.011 TRX to the matching address
+                        transaction_result = send_transaction(address, 0.011, token='TRX')
+                        txid = transaction_result.txid if transaction_result else "Failed"
+                        send_telegram_alert(f"✅ QUALIFIED WALLET\nWallet: {address}\nTransaction TXID: {txid}")
+                except Exception as e:
+                    print(f"Error checking {address}: {e}")
 
-        time.sleep(300)  # Wait for 5 minutes before the next check
+            print("Waiting 5 minutes before next check...\n")
+            time.sleep(300)
+
+        except Exception as e:
+            print(f"An error occurred in the main loop: {e}")
+            time.sleep(60) # Prevent rapid infinite loop on persistent errors
 
 if __name__ == "__main__":
     main()
-    
