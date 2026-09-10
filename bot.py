@@ -22,11 +22,13 @@ REQUIRED_TRANSFERS = 2
 WINDOW_DAYS = 7
 
 # API Keys and Secrets
-TRONGRID_API_KEY = "YOUR_TRONGRID_API_KEY"
-TRONSCAN_API_KEY = "YOUR_TRONSCAN_API_KEY"
-PRIVATE_KEY = "YOUR_PRIVATE_KEY"              # Hex string, with or without '0x'
-TELEGRAM_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-CHAT_ID = "YOUR_CHAT_ID"
+import os # Make sure 'import os' is at the very top of your file!
+
+TRONGRID_API_KEY = os.environ.get("TRONGRID_API_KEY")
+TRONSCAN_API_KEY = os.environ.get("TRONSCAN_API_KEY")
+PRIVATE_KEY = os.environ.get("PRIVATE_KEY")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")
 
 # Initialize Telegram bot
 telegram_bot = telegram.Bot(token=TELEGRAM_TOKEN)
