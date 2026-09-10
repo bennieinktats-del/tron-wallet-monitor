@@ -1,7 +1,5 @@
 import os
 import time
-import random
-import string
 import requests
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -23,11 +21,11 @@ REQUIRED_TRANSFERS = 2   # Number of qualifying transfers required
 WINDOW_DAYS = 7          # Look back period in days
 
 # API Keys and Secrets
-TRONGRID_API_KEY = os.getenv("TRONGRID_API_KEY", "")  # Your TRON Grid API key
-TRONSCAN_API_KEY = os.getenv("TRONSCAN_API_KEY", "")  # Your TRON Scan API key
-PRIVATE_KEY = os.getenv("TRON_PRIVATE_KEY", "")        # Your TRON wallet private key
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")        # Your Telegram bot token
-CHAT_ID = os.getenv("CHAT_ID", "")                      # Your Telegram chat ID
+TRONGRID_API_KEY = "YOUR_TRONGRID_API_KEY"  # Replace with your TRON Grid API key
+TRONSCAN_API_KEY = "YOUR_TRONSCAN_API_KEY"  # Replace with your TRON Scan API key
+PRIVATE_KEY = "YOUR_PRIVATE_KEY"              # Replace with your TRON wallet private key
+TELEGRAM_TOKEN = "8874535199:AAFMTgsh3G-U3GHNm2jiukeMzBV8SC7VFUk"  # Your Telegram bot token
+CHAT_ID = "YOUR_CHAT_ID"                      # Replace with your Telegram chat ID
 
 # Initialize Telegram bot
 telegram_bot = telegram.Bot(token=TELEGRAM_TOKEN)
@@ -38,7 +36,7 @@ telegram_bot = telegram.Bot(token=TELEGRAM_TOKEN)
 
 def trongrid_get(path, params=None):
     headers = {}
-    if TRONGRID_API_KEY:
+    if TRONGGRID_API_KEY:
         headers["TRON-PRO-API-KEY"] = TRONGRID_API_KEY
 
     url = TRONGRID_URL + path
@@ -261,4 +259,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
+    
