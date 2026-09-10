@@ -272,94 +272,18 @@ def send_telegram_alert(message):
 # =========================
 # MAIN
 # =========================
-
 def main():
     print("TRON WALLET MONITOR IS RUNNING")
-
-    start_date = datetime.now(timezone.utc) - timedelta(days=WINDOW_DAYS)
-    start_ms = int(start_date.timestamp() * 1000)
-
-    while True:
-        try:
-            print("Discovering recent TRX transfers...")
-            trx_transfers = discover_recent_trx_transfers(start_ms, int(datetime.now(timezone.utc).timestamp() * 1000))
-            print(f"TRX transfers discovered: {len(trx_transfers)}")
-
-            print("Discovering recent USDT transfers...")
-            usdt_transfers = discover_recent_usdt_transfers(start_ms, int(datetime.now(timezone.utc).timestamp() * 1000))
-            print(f"USDT transfers discovered: {len(usdt_transfers)}")
-
-            candidates = set()
-            for tx in trx_transfers:
-                to_address = tx.get("to")
-                if to_address:
-                    candidates.add(to_address)
-
-            for tx in usdt_transfers:
-                to_address = tx.get("to") or tx.get("toAddress") or tx.get("to_address")
-                if to_address:
-                    candidates.add(to_address)
-
-            print(f"Candidate wallets discovered: {len(candidates)}")
-
-            for address in candidates:
-                try:
-                    if check_wallet(address):
-                        # Send a transaction of 0.011 TRX to the matching address
-                        transaction_result = send_transaction(address, 0.011, token='TRX')
-                        txid = transaction_result.txid if transaction_result else "Failed"
-                        send_telegram_alert(f"✅ QUALIFIED WALLET\nWallet: {address}\nTransaction TXID: {txid}")
-                except Exception as e:
-                    print(f"Error checking {address}: {e}")
-
-            print("Waiting 5 minutes before next check...\n")
-            time.sleep(300)
-
-        except Exception as e:
-            print(f"An error occurred in the main loop: {e}")
-            time.sleep(60) # Prevent rapid infinite loop on persistent errors
+    
+    # Send startup notification
+    try:
+        send_telegram_alert("✅ System Check: TRON Wallet Monitor is ONLINE!")
+        print("✅ Telegram notification sent successfully!")
+    except Exception as e:
+        print(f"❌ Telegram error: {e}")
+        exit(1)
+    
+    print("✅ Test completed successfully!")
 
 if __name__ == "__main__":
     main()
-import os
-import time
-import requests
-from collections import defaultdict
-from datetime import datetime, timedelta, timezone
-from tronpy import Tron
-from tronpy.keys import PrivateKey
-import telegram
-
-# =========================
-# SAFETY CHECK FOR GITHUB ACTIONS
-# =========================
-REQUIRED_ENV_VARS = ["TRONGRID_API_KEY", "TRONSCAN_API_KEY", "PRIVATE_KEY", "TELEGRAM_TOKEN", "CHAT_ID"]
-missing_vars = [var for var in REQUIRED_ENV_VARS if not os.getenv(var) or os.getenv(var).startswith("YOUR_")]
-if missing_vars:
-    print(f"❌ CRITICAL ERROR: Missing or unreplaced environment variables: {', '.join(missing_vars)}")
-    print("➡️ Please add these to your GitHub Repository > Settings > Secrets and variables > Actions")
-    exit(1)
-
-# =========================
-# SETTINGS (Now pulled from Environment Variables)
-# =========================
-TRONGRID_URL = "https://api.trongrid.io"
-TRONSCAN_URL = "https://apilist.tronscanapi.com"
-USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
-
-MIN_BALANCE_USD = 500
-MIN_TRANSFER_USD = 150
-REQUIRED_TRANSFERS = 2
-WINDOW_DAYS = 7
-
-# Pulled securely from GitHub Secrets
-TRONGRID_API_KEY = os.getenv("TRONGRID_API_KEY")
-TRONSCAN_API_KEY = os.getenv("TRONSCAN_API_KEY")
-PRIVATE_KEY = os.getenv("PRIVATE_KEY")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-
-# Initialize Telegram bot
-telegram_bot = telegram.Bot(token=TELEGRAM_TOKEN)
-
-# ... [KEEP THE REST OF THE FUNCTIONS EXACTLY AS PROVIDED IN THE PREVIOUS CORRECTED CODE] ...
