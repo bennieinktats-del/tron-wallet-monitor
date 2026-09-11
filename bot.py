@@ -1,13 +1,7 @@
 import os
-import time
+import json
 import requests
 from datetime import datetime, timedelta, timezone
-
-# =========================
-# 🟢 USER SETTINGS
-# =========================
-TARGET_PAIRS = 5
-WINDOW_DAYS = 7
 
 # =========================
 # 1. LOAD SECRETS
@@ -30,29 +24,23 @@ def send_telegram_alert(message):
         print(f"Telegram error: {e}")
 
 # =========================
-# 2. MAIN SCANNER
+# 2. DATA INSPECTOR
 # =========================
 def main():
-    print("🚀 Starting Pure Scanner...")
-    send_telegram_alert("🚀 <b>Pure Scanner Started</b>\nLooking for: <b>Any Sender → Receiver (2+ times)</b>\n(No CEX/Balance checks yet for speed)")
+    print("🔍 Inspecting TronScan API data structure...")
+    send_telegram_alert(" <b>Data Inspector Started</b>\nFetching sample transactions to see field names...")
     
-    found_pairs = []
-    checked_receivers = set()
-    
-    # Calculate time window
     end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_ms = int((datetime.now(timezone.utc) - timedelta(days=WINDOW_DAYS)).timestamp() * 1000)
+    start_ms = int((datetime.now(timezone.utc) - timedelta(days=7)).timestamp() * 1000)
     
     headers = {"TRON-PRO-API-KEY": TRONSCAN_API_KEY}
     
-    # We will fetch a large batch of 500 transactions at once
-    print("📡 Fetching large batch of data...")
     try:
         response = requests.get(
             "https://apilist.tronscanapi.com/api/token_trc20/transfers",
             params={
                 "start": 0, 
-                "limit": 500, 
+                "limit": 5, 
                 "sort": "-timestamp",
                 "start_timestamp": start_ms, 
                 "end_timestamp": end_ms,
@@ -64,60 +52,29 @@ def main():
         
         data = response.json()
         transfers = data.get("data", [])
-        print(f"✅ Received {len(transfers)} transactions from API!")
         
-        # Group transactions by Receiver (Wallet B)
-        receivers_map = {}
-        for tx in transfers:
-            # TronScan uses 'to_address' or 'to'
-            to_addr = tx.get("to_address") or tx.get("to")
-            from_addr = tx.get("from_address") or tx.get("from")
+        print(f"✅ Found {len(transfers)} transfers")
+        
+        if transfers:
+            # Print the first transaction as formatted JSON
+            first_tx = transfers[0]
+            print("\n=== FIRST TRANSACTION (ALL FIELDS) ===")
+            print(json.dumps(first_tx, indent=2))
             
-            if to_addr and from_addr:
-                if to_addr not in receivers_map:
-                    receivers_map[to_addr] = []
-                receivers_map[to_addr].append(from_addr)
-                
-        print(f"🔍 Analyzing {len(receivers_map)} unique receivers...")
-        
-        # Find patterns: Did any sender send to the same receiver 2+ times?
-        for wallet_b, senders in receivers_map.items():
-            if len(found_pairs) >= TARGET_PAIRS:
-                break
-                
-            if wallet_b in checked_receivers:
-                continue
-                
-            # Count how many times each sender sent to this receiver
-            sender_counts = {}
-            for sender in senders:
-                sender_counts[sender] = sender_counts.get(sender, 0) + 1
-                
-            # Check if any sender sent 2 or more times
-            for sender, count in sender_counts.items():
-                if count >= 2:
-                    print(f"🎯 MATCH FOUND! {sender} sent to {wallet_b} ({count} times)")
-                    
-                    found_pairs.append({
-                        "sender": sender,
-                        "receiver": wallet_b,
-                        "count": count
-                    })
-                    
-                    send_telegram_alert(f"✅ <b>Pair {len(found_pairs)}/{TARGET_PAIRS} Found!</b>\n<b>Sender:</b> <code>{sender}</code>\n<b>Receiver:</b> <code>{wallet_b}</code>\n<b>Frequency:</b> {count} times")
-                    break # Move to next receiver
-                    
-            checked_receivers.add(wallet_b)
+            # Send to Telegram (truncated)
+            tx_json = json.dumps(first_tx, indent=2)
+            if len(tx_json) > 4000:
+                tx_json = tx_json[:4000] + "\n...(truncated)"
+            
+            send_telegram_alert(f"✅ <b>API Working!</b>\n\n<b>First Transaction Fields:</b>\n\n<pre>{tx_json}</pre>")
+            
+            # Also print all available keys
+            print("\n=== ALL FIELD NAMES ===")
+            print(list(first_tx.keys()))
             
     except Exception as e:
         print(f"❌ Error: {e}")
-        send_telegram_alert(f"❌ Error: {e}")
-        return
-
-    if len(found_pairs) > 0:
-        send_telegram_alert(f"🏁 <b>Scan Complete!</b>\nFound {len(found_pairs)} pairs.\nNext step: Add CEX checks and Transfer logic.")
-    else:
-        send_telegram_alert("⚠️ Scan finished but found 0 pairs in this batch. Try increasing limit or days.")
+        send_telegram_alert(f" Error: {e}")
 
 if __name__ == "__main__":
     main()
