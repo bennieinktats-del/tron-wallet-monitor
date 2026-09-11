@@ -171,7 +171,7 @@ def main():
             receivers_map[to_addr].append({"from": from_addr, "amount": amount, "txid": txid})
 
         # Check for patterns
-        # Check for patterns - SIMPLIFIED FOR SPEED
+       # Check for patterns - SIMPLIFIED FOR SPEED
         for wallet_b, txs in receivers_map.items():
             if len(found_pairs) >= TARGET_PAIRS: break
             if wallet_b in checked_receivers: continue
@@ -198,8 +198,18 @@ def main():
             trx_bal = get_trx_balance(wallet_b)
             if usdt_bal + (trx_bal * 0.25) < MIN_BALANCE_USD: 
                 continue
-             print(f"DEBUG: Found match! Wallet A: {wallet_a}, Wallet B: {wallet_b}, Is CEX: {is_a_cex}")   
+            
+            # DEBUG OUTPUT
+            print(f"DEBUG: Found match! Wallet A: {wallet_a}, Wallet B: {wallet_b}, Is CEX: {is_a_cex}")
+                
             # SUCCESS!
+            checked_receivers.add(wallet_b)
+            found_pairs.append({
+                "wallet_a": wallet_a, "wallet_b": wallet_b, 
+                "a_cex_name": a_cex_name,
+                "txids": [tx1["txid"]]
+            })
+            send_telegram_alert(f"✅ <b>Pair {len(found_pairs)}/{TARGET_PAIRS} Found!</b>\n🏦 A ({a_cex_name}): <code>{wallet_a}</code>\n B (Private): <code>{wallet_b}</code>")
             checked_receivers.add(wallet_b)
             found_pairs.append({
                 "wallet_a": wallet_a, "wallet_b": wallet_b, 
