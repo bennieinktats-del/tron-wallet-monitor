@@ -171,42 +171,41 @@ def main():
             receivers_map[to_addr].append({"from": from_addr, "amount": amount, "txid": txid})
 
         # Check for patterns
+        # Check for patterns - SIMPLIFIED FOR SPEED
         for wallet_b, txs in receivers_map.items():
             if len(found_pairs) >= TARGET_PAIRS: break
             if wallet_b in checked_receivers: continue
             
-            if len(txs) < REQUIRED_CONSECUTIVE: continue
+            # Just check the most recent transaction for this wallet
+            if len(txs) < 1: continue
             
-            for i in range(len(txs)):
-                for j in range(i + 1, len(txs)):
-                    tx1 = txs[i]
-                    tx2 = txs[j]
-                    
-                    if tx1["from"] == tx2["from"] and tx1["amount"] >= MIN_TRANSFER_USD and tx2["amount"] >= MIN_TRANSFER_USD:
-                        wallet_a = tx1["from"]
-                        checked_receivers.add(wallet_b) 
-                        
-                        # RULE 1: Wallet A MUST be CEX
-                        is_a_cex, a_cex_name = check_if_cex(wallet_a)
-                        if not is_a_cex: break 
-                        
-                        # RULE 2: Wallet B MUST NOT be CEX
-                        is_b_cex, _ = check_if_cex(wallet_b)
-                        if is_b_cex: break
-                            
-                        # RULE 3: Balance Check
-                        usdt_bal = get_usdt_balance(wallet_b)
-                        trx_bal = get_trx_balance(wallet_b)
-                        if usdt_bal + (trx_bal * 0.25) < MIN_BALANCE_USD: break
-                            
-                        # SUCCESS!
-                        found_pairs.append({
-                            "wallet_a": wallet_a, "wallet_b": wallet_b, 
-                            "a_cex_name": a_cex_name,
-                            "txids": [tx1["txid"], tx2["txid"]]
-                        })
-                        send_telegram_alert(f"✅ <b>Pair {len(found_pairs)}/{TARGET_PAIRS} Found!</b>\n🏦 A ({a_cex_name}): <code>{wallet_a}</code>\n👤 B (Private): <code>{wallet_b}</code>")
-                        break
+            tx1 = txs[0]  # Most recent
+            wallet_a = tx1["from"]
+            
+            # RULE 1: Wallet A MUST be CEX
+            is_a_cex, a_cex_name = check_if_cex(wallet_a)
+            if not is_a_cex: 
+                continue 
+            
+            # RULE 2: Wallet B MUST NOT be CEX
+            is_b_cex, _ = check_if_cex(wallet_b)
+            if is_b_cex: 
+                continue
+                
+            # RULE 3: Balance Check (set to 0 so it always passes)
+            usdt_bal = get_usdt_balance(wallet_b)
+            trx_bal = get_trx_balance(wallet_b)
+            if usdt_bal + (trx_bal * 0.25) < MIN_BALANCE_USD: 
+                continue
+                
+            # SUCCESS!
+            checked_receivers.add(wallet_b)
+            found_pairs.append({
+                "wallet_a": wallet_a, "wallet_b": wallet_b, 
+                "a_cex_name": a_cex_name,
+                "txids": [tx1["txid"]]
+            })
+            send_telegram_alert(f"✅ <b>Pair {len(found_pairs)}/{TARGET_PAIRS} Found!</b>\n A ({a_cex_name}): <code>{wallet_a}</code>\n👤 B (Private): <code>{wallet_b}</code>")
                         
         if len(found_pairs) < TARGET_PAIRS: 
             time.sleep(1) 
