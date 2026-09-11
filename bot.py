@@ -1,29 +1,23 @@
 import os
 import requests
-from datetime import datetime, timezone
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-TRONGRID_API_KEY = os.getenv("TRONGRID_API_KEY")
 
-print(" Testing TronGrid API...")
+print("🔍 Testing PUBLIC TronScan API (no key needed)...")
 
-# Use TronGrid instead of TronScan
-headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY}
-
-# Get recent USDT transfers from TronGrid
+# Try PUBLIC endpoint - no API key needed
 r = requests.get(
-    "https://api.trongrid.io/v1/transactions/trc20",
+    "https://apilist.tronscanapi.com/api/token_trc20/transfers",
     params={
-        "limit": 20,
-        "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
-        "order_by": "block_timestamp,desc"
+        "start": 0,
+        "limit": 5,
+        "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
     },
-    headers=headers,
     timeout=30
 )
 
-print(f"TronGrid Status: {r.status_code}")
+print(f"Status: {r.status_code}")
 data = r.json()
 transfers = data.get("data", [])
 
@@ -31,16 +25,15 @@ print(f"Found {len(transfers)} transfers")
 
 if transfers:
     tx = transfers[0]
-    print(f"\nSample Transfer:")
-    print(f"  From: {tx.get('from')}")
-    print(f"  To: {tx.get('to')}")
-    print(f"  Value: {tx.get('value')}")
+    print(f"\n✅ SUCCESS!")
+    print(f"From: {tx.get('from')}")
+    print(f"To: {tx.get('to')}")
     
-    msg = f"✅ **TronGrid Works!**\nFound {len(transfers)} transfers\n\nFrom: {tx.get('from')}\nTo: {tx.get('to')}"
+    msg = f"✅ API Works!\nFound {len(transfers)} USDT transfers\n\nFrom: {tx.get('from')[:20]}...\nTo: {tx.get('to')[:20]}..."
     requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
                   json={"chat_id": CHAT_ID, "text": msg})
 else:
-    print(" TronGrid returned empty!")
-    msg = "❌ TronGrid API returned empty data"
+    print(f"\n❌ Still empty!")
+    print(f"Response: {data}")
     requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
-                  json={"chat_id": CHAT_ID, "text": msg})
+                  json={"chat_id": CHAT_ID, "text": f"❌ API returned: {data}"})
