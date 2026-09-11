@@ -198,7 +198,7 @@ def main():
             trx_bal = get_trx_balance(wallet_b)
             if usdt_bal + (trx_bal * 0.25) < MIN_BALANCE_USD: 
                 continue
-                
+             print(f"DEBUG: Found match! Wallet A: {wallet_a}, Wallet B: {wallet_b}, Is CEX: {is_a_cex}")   
             # SUCCESS!
             checked_receivers.add(wallet_b)
             found_pairs.append({
