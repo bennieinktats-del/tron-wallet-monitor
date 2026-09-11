@@ -182,10 +182,11 @@ def main():
             tx1 = txs[0]  # Most recent
             wallet_a = tx1["from"]
             
-            # RULE 1: Wallet A MUST be CEX
+            # RULE 1: Wallet A MUST be CEX (TEMPORARILY DISABLED FOR TESTING)
             is_a_cex, a_cex_name = check_if_cex(wallet_a)
-            if not is_a_cex: 
-                continue 
+            # if not is_a_cex: 
+            #     continue 
+            a_cex_name = "Unknown"  # Temporary label
             
             # RULE 2: Wallet B MUST NOT be CEX
             is_b_cex, _ = check_if_cex(wallet_b)
