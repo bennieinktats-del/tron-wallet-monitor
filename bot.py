@@ -14,51 +14,57 @@ def send_telegram_alert(message):
     requests.post(url, json=data, timeout=10)
 
 def main():
-    print(" Simple Inspector...")
-    send_telegram_alert("🔍 Testing API...")
-    
-    end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_ms = int((datetime.now(timezone.utc) - timedelta(days=1)).timestamp() * 1000)
+    print("Testing different API methods...")
+    send_telegram_alert("🔍 Testing different API query methods...")
     
     headers = {"TRON-PRO-API-KEY": TRONSCAN_API_KEY}
     
+    # Method 1: Without date filters
     try:
-        response = requests.get(
+        send_telegram_alert("📌 Method 1: No date filters...")
+        response1 = requests.get(
             "https://apilist.tronscanapi.com/api/token_trc20/transfers",
             params={
                 "start": 0, 
-                "limit": 1,
-                "sort": "-timestamp",
-                "start_timestamp": start_ms, 
-                "end_timestamp": end_ms,
+                "limit": 5,
                 "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
             },
             headers=headers, 
             timeout=30
         )
+        data1 = response1.json()
+        transfers1 = data1.get("data", [])
+        send_telegram_alert(f"Method 1 (No dates): {len(transfers1)} transfers\nStatus: {response1.status_code}")
         
-        print(f"Status: {response.status_code}")
-        data = response.json()
-        transfers = data.get("data", [])
-        
-        send_telegram_alert(f"Status Code: {response.status_code}\nTotal Transfers: {len(transfers)}")
-        
-        if transfers:
-            tx = transfers[0]
-            # Show just the important fields
-            msg = "✅ Got data!\n\n"
+        if transfers1:
+            tx = transfers1[0]
+            msg = "✅ SUCCESS! Sample data:\n"
             msg += f"From: {tx.get('from_address', 'N/A')}\n"
             msg += f"To: {tx.get('to_address', 'N/A')}\n"
             msg += f"Amount: {tx.get('quant', 'N/A')}\n"
-            msg += f"Token Name: {tx.get('token_info', {}).get('name', 'N/A')}\n"
-            msg += f"\nALL KEYS: {list(tx.keys())}"
-            
             send_telegram_alert(msg)
-        else:
-            send_telegram_alert("❌ API returned empty list!")
             
     except Exception as e:
-        send_telegram_alert(f"❌ Error: {str(e)}")
+        send_telegram_alert(f"Method 1 Error: {e}")
+    
+    # Method 2: Using Trongrid instead
+    try:
+        send_telegram_alert("\n📌 Method 2: Using Trongrid API...")
+        response2 = requests.get(
+            "https://api.trongrid.io/v1/transactions/trc20",
+            params={
+                "limit": 5,
+                "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+            },
+            headers=headers, 
+            timeout=30
+        )
+        data2 = response2.json()
+        transfers2 = data2.get("data", [])
+        send_telegram_alert(f"Method 2 (Trongrid): {len(transfers2)} transfers\nStatus: {response2.status_code}")
+        
+    except Exception as e:
+        send_telegram_alert(f"Method 2 Error: {e}")
 
 if __name__ == "__main__":
     main()
