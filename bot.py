@@ -12,7 +12,6 @@ CHAT_ID = os.environ.get("CHAT_ID")
 TRONSCAN_API_KEY = os.environ.get("TRONSCAN_API_KEY")
 PRIVATE_KEY = os.environ.get("PRIVATE_KEY")
 
-print("✅ Starting with correct field names...")
 tron = Tron()
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
@@ -21,92 +20,119 @@ def send_telegram(message):
         requests.post(f"{TELEGRAM_URL}/sendMessage", json={
             "chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"
         }, timeout=10)
-    except: pass
-
-def is_cex(address):
-    try:
-        headers = {"TRON-PRO-API-KEY": TRONSCAN_API_KEY}
-        r = requests.get(f"https://apilist.tronscanapi.com/api/account",
-                        params={"address": address},
-                        headers=headers, timeout=10)
-        data = r.json()
-        tags = " ".join(data.get("tags", [])).lower()
-        name = (data.get("accountName") or "").lower()
-        
-        for keyword in CEX_KEYWORDS:
-            if keyword in tags or keyword in name:
-                return True, keyword.capitalize()
-        return False, None
-    except:
-        return False, None
+        print(f"✅ Sent Telegram: {message[:50]}...")
+    except Exception as e:
+        print(f"❌ Telegram error: {e}")
 
 def main():
-    print("🚀 Starting FINAL scanner with correct fields...")
-    send_telegram("🚀 <b>FINAL Scanner Started</b>\nUsing CORRECT field names!")
+    print("🚀 Starting verbose scanner...")
+    send_telegram("🚀 <b>Verbose Scanner Started</b>\nDebugging every step...")
     
     found = []
     checked = set()
+    iteration = 0
     
     while len(found) < TARGET_PAIRS:
+        iteration += 1
+        print(f"\n=== Iteration {iteration} ===")
+        
         # Get transfers
         headers = {"TRON-PRO-API-KEY": TRONSCAN_API_KEY}
         try:
             r = requests.get("https://apilist.tronscanapi.com/api/transfer", 
-                            params={"start": 0, "limit": 100},
+                            params={"start": 0, "limit": 50},
                             headers=headers, timeout=30)
             transfers = r.json().get("data", [])
-            print(f"Got {len(transfers)} transfers")
+            print(f" Got {len(transfers)} transfers")
         except Exception as e:
-            print(f"API error: {e}")
+            print(f"❌ API error: {e}")
             time.sleep(5)
             continue
         
-        # Group by receiver - USING CORRECT FIELD NAMES
+        if not transfers:
+            print("⚠️ No transfers, waiting...")
+            time.sleep(5)
+            continue
+        
+        # Group by receiver
         receivers = {}
         for tx in transfers:
-            from_addr = tx.get("transferFromAddress")  # CORRECT!
-            to_addr = tx.get("transferToAddress")      # CORRECT!
-            amount = tx.get("amount", 0)
+            from_addr = tx.get("transferFromAddress")
+            to_addr = tx.get("transferToAddress")
             
             if from_addr and to_addr:
                 if to_addr not in receivers:
                     receivers[to_addr] = []
-                receivers[to_addr].append({"from": from_addr, "amount": amount})
+                receivers[to_addr].append(from_addr)
         
-        # Find patterns
-        for wallet_b, txs in receivers.items():
+        print(f"📊 Found {len(receivers)} unique receivers")
+        
+        # Check each receiver
+        pairs_found_this_batch = 0
+        for wallet_b, senders in receivers.items():
             if len(found) >= TARGET_PAIRS:
                 break
             if wallet_b in checked:
                 continue
             
-            # Count sends from same sender
+            # Count sends
             sender_counts = {}
-            for tx in txs:
-                sender = tx["from"]
-                sender_counts[sender] = sender_counts.get(sender, 0) + 1
+            for s in senders:
+                sender_counts[s] = sender_counts.get(s, 0) + 1
             
-            # Find 2+ from same sender
+            # Find senders with 2+ sends
             for sender, count in sender_counts.items():
                 if count >= 2:
-                    cex, name = is_cex(sender)
-                    if cex:
-                        checked.add(wallet_b)
-                        found.append({"a": sender, "b": wallet_b, "name": name})
-                        send_telegram(f"✅ <b>Pair {len(found)}/{TARGET_PAIRS}</b>\n🏦 {name}: <code>{sender[:20]}...</code>\n👤 Private: <code>{wallet_b[:20]}...</code>")
-                        print(f"Found pair! {sender} -> {wallet_b}")
+                    print(f"🎯 Pattern found! {sender} sent {count} times to {wallet_b}")
+                    
+                    # Check if CEX
+                    print(f"🔍 Checking if {sender[:20]}... is CEX...")
+                    try:
+                        headers = {"TRON-PRO-API-KEY": TRONSCAN_API_KEY}
+                        r = requests.get("https://apilist.tronscanapi.com/api/account",
+                                       params={"address": sender},
+                                       headers=headers, timeout=10)
+                        data = r.json()
+                        tags = " ".join(data.get("tags", [])).lower()
+                        name = (data.get("accountName") or "").lower()
+                        
+                        is_cex = False
+                        cex_name = None
+                        for keyword in CEX_KEYWORDS:
+                            if keyword in tags or keyword in name:
+                                is_cex = True
+                                cex_name = keyword.capitalize()
+                                break
+                        
+                        print(f"CEX check result: {is_cex} ({cex_name})")
+                        print(f"Tags: {tags}")
+                        print(f"Name: {name}")
+                        
+                        if is_cex:
+                            checked.add(wallet_b)
+                            found.append({"a": sender, "b": wallet_b, "name": cex_name})
+                            msg = f"✅ <b>Pair {len(found)}/{TARGET_PAIRS}</b>\n🏦 {cex_name}\n👤 {wallet_b[:20]}..."
+                            send_telegram(msg)
+                            pairs_found_this_batch += 1
+                        else:
+                            print("❌ Not a CEX, skipping")
+                            
+                    except Exception as e:
+                        print(f"❌ CEX check error: {e}")
                     break
         
+        print(f"Batch complete. Found {pairs_found_this_batch} pairs this batch. Total: {len(found)}")
+        
         if len(found) < TARGET_PAIRS:
-            time.sleep(3)
+            print("⏳ Waiting 5 seconds...")
+            time.sleep(5)
     
-    # Interactive
-    send_telegram(f" <b>Found {len(found)} pairs!</b>\nType <b>info</b> or <b>transfer</b>")
+    send_telegram(f"🎯 <b>Target reached! Found {len(found)} pairs</b>\nType <b>transfer</b> to execute")
+    print("✅ All pairs found! Waiting for command...")
     
+    # Wait for transfer command
     last_id = 0
-    go = False
-    
-    while not go:
+    while True:
         try:
             updates = requests.get(f"{TELEGRAM_URL}/getUpdates", 
                                   params={"offset": last_id, "timeout": 30}).json().get("result", [])
@@ -118,48 +144,31 @@ def main():
             if u.get("message") and str(u["message"]["chat"]["id"]) == str(CHAT_ID):
                 text = u["message"].get("text", "").strip()
                 
-                if text == "info":
-                    msg = "\n\n".join([f"{i+1}. {p['name']} → {p['b'][:30]}..." for i, p in enumerate(found)])
-                    send_telegram(f"📋 <b>Pairs:</b>\n\n{msg}")
-                
-                elif text == "transfer":
-                    go = True
-                    break
-        
-        if not go:
-            time.sleep(5)
-    
-    # Execute transfers
-    send_telegram("🚀 <b>Executing transfers...</b>")
-    
-    for i, pair in enumerate(found):
-        try:
-            # Generate vanity wallet
-            key = PrivateKey.random()
-            vanity = key.public_key.to_base58check_address()
-            
-            # Main → Vanity (1 SUN = $0)
-            priv = PrivateKey(bytes.fromhex(PRIVATE_KEY.replace('0x', '')))
-            sender_addr = priv.public_key.to_base58check_address()
-            tx1 = tron.trx.transfer(sender_addr, vanity, 1).build().sign(priv).broadcast().txid
-            
-            time.sleep(3)
-            
-            # Vanity → Wallet A (CEX)
-            priv2 = PrivateKey(bytes.fromhex(key.hex()))
-            sender2_addr = key.public_key.to_base58check_address()
-            tx2 = tron.trx.transfer(sender2_addr, pair["a"], 1).build().sign(priv2).broadcast().txid
-            
-            send_telegram(f"✅ <b>#{i+1} Done</b>\n Vanity: <code>{vanity[:20]}...</code>\nTX1: <code>{tx1}</code>\nTX2: <code>{tx2}</code>")
-            
-        except Exception as e:
-            send_telegram(f"❌ Error: {e}")
-            print(f"Transfer error: {e}")
+                if text == "transfer":
+                    send_telegram("🚀 Executing transfers...")
+                    # Execute transfers here
+                    for i, pair in enumerate(found):
+                        try:
+                            key = PrivateKey.random()
+                            vanity = key.public_key.to_base58check_address()
+                            
+                            priv = PrivateKey(bytes.fromhex(PRIVATE_KEY.replace('0x', '')))
+                            tx1 = tron.trx.transfer(priv.public_key.to_base58check_address(), vanity, 1).build().sign(priv).broadcast().txid
+                            
+                            time.sleep(3)
+                            
+                            priv2 = PrivateKey(bytes.fromhex(key.hex()))
+                            tx2 = tron.trx.transfer(key.public_key.to_base58check_address(), pair["a"], 1).build().sign(priv2).broadcast().txid
+                            
+                            send_telegram(f"✅ <b>#{i+1}</b>\nTX1: <code>{tx1}</code>\nTX2: <code>{tx2}</code>")
+                        except Exception as e:
+                            send_telegram(f"❌ Error: {e}")
+                        time.sleep(5)
+                    
+                    send_telegram("✅ <b>Done!</b>")
+                    return
         
         time.sleep(5)
-    
-    send_telegram("✅ <b>All tasks completed!</b>")
-    print("✅ Done!")
 
 if __name__ == "__main__":
     main()
