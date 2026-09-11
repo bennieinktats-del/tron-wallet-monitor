@@ -2,70 +2,57 @@ import os
 import time
 import requests
 from datetime import datetime, timedelta, timezone
-from tronpy import Tron
-from tronpy.keys import PrivateKey
 
 # =========================
 # 🟢 USER SETTINGS
 # =========================
 TARGET_PAIRS = 5
-MIN_BALANCE_USD = 0
-MIN_TRANSFER_USD = 1
 WINDOW_DAYS = 7
-GAS_COST_PER_PAIR_TRX = 2.2
-
-CEX_KEYWORDS = ['binance', 'okx', 'huobi', 'htx', 'gate', 'kucoin', 'bybit', 'mexc', 'bitfinex', 'coinbase', 'kraken', 'bitget', 'poloniex']
 
 # =========================
 # 1. LOAD SECRETS
 # =========================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
-TRONGRID_API_KEY = os.environ.get("TRONGRID_API_KEY")
 TRONSCAN_API_KEY = os.environ.get("TRONSCAN_API_KEY")
-PRIVATE_KEY = os.environ.get("PRIVATE_KEY")
 
-if not all([TELEGRAM_BOT_TOKEN, CHAT_ID, TRONGRID_API_KEY, TRONSCAN_API_KEY, PRIVATE_KEY]):
-    raise Exception("Missing GitHub Secrets!")
+if not all([TELEGRAM_BOT_TOKEN, CHAT_ID, TRONSCAN_API_KEY]):
+    raise Exception("Missing Secrets!")
 
-print("✅ All secrets loaded successfully!")
-
-tron = Tron()
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# =========================
-# 2. TELEGRAM
-# =========================
 def send_telegram_alert(message):
     url = f"{TELEGRAM_URL}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
     try:
-        response = requests.post(url, json=data, timeout=10)
-        print(f"Telegram response: {response.json()}")
+        requests.post(url, json=data, timeout=10)
     except Exception as e:
         print(f"Telegram error: {e}")
 
 # =========================
-# 3. MAIN FUNCTION - SUPER SIMPLE
+# 2. MAIN SCANNER
 # =========================
 def main():
-    print("🚀 TRON MONITOR STARTING...")
-    send_telegram_alert("🚀 TRON Monitor Started - Testing...")
+    print("🚀 Starting Pure Scanner...")
+    send_telegram_alert("🚀 <b>Pure Scanner Started</b>\nLooking for: <b>Any Sender → Receiver (2+ times)</b>\n(No CEX/Balance checks yet for speed)")
     
-    # Test 1: Fetch recent USDT transfers
-    print("📡 Fetching recent USDT transfers from TronScan...")
+    found_pairs = []
+    checked_receivers = set()
     
+    # Calculate time window
     end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     start_ms = int((datetime.now(timezone.utc) - timedelta(days=WINDOW_DAYS)).timestamp() * 1000)
     
     headers = {"TRON-PRO-API-KEY": TRONSCAN_API_KEY}
     
+    # We will fetch a large batch of 500 transactions at once
+    print("📡 Fetching large batch of data...")
     try:
         response = requests.get(
             "https://apilist.tronscanapi.com/api/token_trc20/transfers",
             params={
                 "start": 0, 
-                "limit": 10, 
+                "limit": 500, 
                 "sort": "-timestamp",
                 "start_timestamp": start_ms, 
                 "end_timestamp": end_ms,
@@ -75,30 +62,62 @@ def main():
             timeout=30
         )
         
-        print(f"API Status Code: {response.status_code}")
-        
         data = response.json()
         transfers = data.get("data", [])
+        print(f"✅ Received {len(transfers)} transactions from API!")
         
-        print(f"✅ Found {len(transfers)} transfers!")
-        
-        # Show first transfer as test
-        if transfers:
-            first_tx = transfers[0]
-            print(f"Sample TX - From: {first_tx.get('from')}")
-            print(f"Sample TX - To: {first_tx.get('to')}")
-            print(f"Sample TX - Amount: {first_tx.get('quant')}")
+        # Group transactions by Receiver (Wallet B)
+        receivers_map = {}
+        for tx in transfers:
+            # TronScan uses 'to_address' or 'to'
+            to_addr = tx.get("to_address") or tx.get("to")
+            from_addr = tx.get("from_address") or tx.get("from")
             
-            send_telegram_alert(f"✅ API Working!\nFound {len(transfers)} transfers\n\nSample:\nFrom: {first_tx.get('from')[:20]}...\nTo: {first_tx.get('to')[:20]}...")
+            if to_addr and from_addr:
+                if to_addr not in receivers_map:
+                    receivers_map[to_addr] = []
+                receivers_map[to_addr].append(from_addr)
+                
+        print(f"🔍 Analyzing {len(receivers_map)} unique receivers...")
         
+        # Find patterns: Did any sender send to the same receiver 2+ times?
+        for wallet_b, senders in receivers_map.items():
+            if len(found_pairs) >= TARGET_PAIRS:
+                break
+                
+            if wallet_b in checked_receivers:
+                continue
+                
+            # Count how many times each sender sent to this receiver
+            sender_counts = {}
+            for sender in senders:
+                sender_counts[sender] = sender_counts.get(sender, 0) + 1
+                
+            # Check if any sender sent 2 or more times
+            for sender, count in sender_counts.items():
+                if count >= 2:
+                    print(f"🎯 MATCH FOUND! {sender} sent to {wallet_b} ({count} times)")
+                    
+                    found_pairs.append({
+                        "sender": sender,
+                        "receiver": wallet_b,
+                        "count": count
+                    })
+                    
+                    send_telegram_alert(f"✅ <b>Pair {len(found_pairs)}/{TARGET_PAIRS} Found!</b>\n<b>Sender:</b> <code>{sender}</code>\n<b>Receiver:</b> <code>{wallet_b}</code>\n<b>Frequency:</b> {count} times")
+                    break # Move to next receiver
+                    
+            checked_receivers.add(wallet_b)
+            
     except Exception as e:
-        print(f"❌ API Error: {e}")
-        send_telegram_alert(f" Error: {e}")
+        print(f"❌ Error: {e}")
+        send_telegram_alert(f"❌ Error: {e}")
         return
-    
-    print("✅ Test complete!")
-    send_telegram_alert("✅ Bot is working correctly!")
+
+    if len(found_pairs) > 0:
+        send_telegram_alert(f"🏁 <b>Scan Complete!</b>\nFound {len(found_pairs)} pairs.\nNext step: Add CEX checks and Transfer logic.")
+    else:
+        send_telegram_alert("⚠️ Scan finished but found 0 pairs in this batch. Try increasing limit or days.")
 
 if __name__ == "__main__":
     main()
-
