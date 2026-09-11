@@ -2,13 +2,13 @@ name: TRON Wallet Monitor
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/5 * * * *"
+  # schedule:
+  #   - cron: "*/5 * * * *"
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Get code
         uses: actions/checkout@v4
