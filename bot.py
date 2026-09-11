@@ -7,13 +7,13 @@ from tronpy import Tron
 from tronpy.keys import PrivateKey
 
 # =========================
-#  USER SETTINGS
+#  USER SETTINGS (EXTREMELY BROAD FOR TESTING)
 # =========================
-TARGET_PAIRS = 5
-MIN_BALANCE_USD = 500
-MIN_TRANSFER_USD = 150
-REQUIRED_CONSECUTIVE = 2
-WINDOW_DAYS = 7
+TARGET_PAIRS = 5             # Keep at 5 for a quick test
+MIN_BALANCE_USD = 0          # 🟢 CHANGED: Accept ANY balance (even $0)
+MIN_TRANSFER_USD = 1         #  CHANGED: Accept transfers as low as $1
+REQUIRED_CONSECUTIVE = 2     # Keep at 2 (the core logic)
+WINDOW_DAYS = 30             # 🟢 CHANGED: Look back 30 days for history
 GAS_COST_PER_PAIR_TRX = 2.2
 
 CEX_KEYWORDS = ['binance', 'okx', 'huobi', 'htx', 'gate', 'kucoin', 'bybit', 'mexc', 'bitfinex', 'coinbase', 'kraken', 'bitget', 'poloniex']
