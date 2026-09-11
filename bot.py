@@ -386,4 +386,13 @@ while True:
                         print(f"Failed to import tronpy: {e}")
                         send_telegram(f" Failed to load blockchain library: {e}")
                     except Exception as e:
-                
+                        print(f"Transfer error: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        send_telegram(f"❌ Transfer Error: {e}")
+                    
+                    break  # Exit after transfer command
+
+    time.sleep(5)
+
+print("✅ Workflow finished successfully")
