@@ -212,7 +212,6 @@ def set_telegram_offset(offset):
 
     db.commit()
 
-
 # ============================================================
 # API HEADERS
 # ============================================================
@@ -233,6 +232,33 @@ def trongrid_headers():
         }
 
     return {}
+
+
+def get_usdt_transfers(
+    start_timestamp=None,
+    end_timestamp=None,
+    start=0,
+    limit=50,
+):
+    params = {
+        "start": start,
+        "limit": limit,
+        "contract_address": USDT_CONTRACT,
+        "sort": "-timestamp",
+    }
+
+    if start_timestamp is not None:
+        params["start_timestamp"] = start_timestamp
+
+    if end_timestamp is not None:
+        params["end_timestamp"] = end_timestamp
+
+    return http_get(
+        f"{TRONSCAN_URL}/token_trc20/transfers",
+        params=params,
+        headers=tronscan_headers(),
+        timeout=30,
+    ).get("token_transfers", [])
 
 
 # ============================================================
