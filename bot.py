@@ -637,7 +637,6 @@ def announce_pair(pair_id, pair):
 # ============================================================
 # HISTORICAL SCANNER
 # ============================================================
-
 def historical_scan():
     end_date = utc_now()
     start_date = end_date - timedelta(weeks=WEEKS_BACK)
@@ -661,15 +660,22 @@ def historical_scan():
                 start_timestamp=start_ms,
                 end_timestamp=end_ms,
                 start=offset,
-                limit=100,
+                limit=50,
             )
 
         except Exception as exc:
-            log.error("Historical scan request failed: %s", exc)
+            log.error(
+                "Historical scan request failed: %s",
+                exc
+            )
             time.sleep(10)
             continue
 
         if not transfers:
+            log.info(
+                "No more historical transfers returned at offset %s.",
+                offset
+            )
             break
 
         log.info(
@@ -692,6 +698,10 @@ def historical_scan():
             ).fetchone()["count"]
 
             if current_count >= TARGET_PAIRS:
+                log.info(
+                    "Target of %s eligible pairs reached.",
+                    TARGET_PAIRS
+                )
                 return
 
             try:
@@ -735,15 +745,19 @@ def historical_scan():
         processed += len(transfers)
         offset += len(transfers)
 
-        if len(transfers) < 100:
-            break
-
         log.info(
             "Historical progress: %s transfers",
             processed
         )
 
-    log.info("Historical scan completed.")
+        # Only stop when the API actually returns no records.
+        # A 50-transfer response is NOT treated as the end.
+        time.sleep(0.2)
+
+    log.info(
+        "Historical scan completed. Total transfers processed: %s",
+        processed
+    )
 
 
 # ============================================================
