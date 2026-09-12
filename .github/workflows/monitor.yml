@@ -2,8 +2,6 @@ name: TRON Wallet Monitor
 
 on:
   workflow_dispatch:
-  # schedule:
-  #   - cron: "*/5 * * * *"
 
 jobs:
   monitor:
@@ -29,5 +27,4 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           TRONGRID_API_KEY: ${{ secrets.TRONGRID_API_KEY }}
           TRONSCAN_API_KEY: ${{ secrets.TRONSCAN_API_KEY }}
-          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
         run: python bot.py
