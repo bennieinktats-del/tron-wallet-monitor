@@ -528,13 +528,48 @@ def save_pair(
 # ============================================================
 # PAIR QUALIFICATION
 # ============================================================
-
 def analyze_wallet(wallet_b, start_ms, end_ms):
-    history = get_wallet_history(wallet_b, limit=200)
+    all_history = []
+    offset = 0
+
+    while True:
+        try:
+            batch = get_usdt_transfers(
+                start_timestamp=start_ms,
+                end_timestamp=end_ms,
+                start=offset,
+                limit=50,
+            )
+
+        except Exception as exc:
+            log.warning(
+                "Could not fetch transfers for wallet %s: %s",
+                wallet_b,
+                exc
+            )
+            break
+
+        if not batch:
+            break
+
+        all_history.extend(batch)
+
+        log.info(
+            "Wallet %s analysis batch: %s transfers",
+            wallet_b,
+            len(batch)
+        )
+
+        offset += len(batch)
+
+        if len(batch) < 50:
+            break
+
+        time.sleep(0.2)
 
     by_sender = defaultdict(list)
 
-    for tx in history:
+    for tx in all_history:
         if tx.get("to_address") != wallet_b:
             continue
 
@@ -603,6 +638,7 @@ def analyze_wallet(wallet_b, start_ms, end_ms):
         })
 
     return qualified
+
 
 
 # ============================================================
