@@ -1,393 +1,1249 @@
 import os
 import time
+import sqlite3
+import logging
+import html
 import requests
+
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-import signal
-import sys
 
-print("🚀 Starting Persistent Scanner (MAX 10 MIN)...")
+# ============================================================
+# TRON WALLET MONITOR
+# Persistent historical qualification + ongoing monitoring
+# ============================================================
 
-# Force exit after 10 minutes
-def timeout_handler(signum, frame):
-    print("\n⏰ 10 minute timeout reached - exiting")
-    sys.exit(0)
+print("🚀 Starting Persistent TRON Wallet Monitor...")
 
-signal.signal(signal.SIGALRM, timeout_handler)
-signal.alarm(600)  # 600 seconds = 10 minutes
+# ============================================================
+# CONFIGURATION
+# ============================================================
 
-# =========================
-#  SETTINGS
-# =========================
-TARGET_PAIRS = 5
-MIN_TRANSFER_USD = 50
-WEEKS_BACK = 2
+TARGET_PAIRS = int(os.getenv("TARGET_PAIRS", "5"))
+MIN_TRANSFER_USD = float(os.getenv("MIN_TRANSFER_USD", "50"))
+WEEKS_BACK = int(os.getenv("WEEKS_BACK", "2"))
+
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "60"))
+MONITOR_INTERVAL = int(os.getenv("MONITOR_INTERVAL", "120"))
+
+TRONSCAN_API_KEY = os.getenv("TRONSCAN_API_KEY", "")
+TRONGRID_API_KEY = os.getenv("TRONGRID_API_KEY", "")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.getenv("CHAT_ID", "")
-TRONSCAN_API_KEY = os.getenv("TRONSCAN_API_KEY", "")
-TRONGRID_API_KEY = os.getenv("TRONGRID_API_KEY", "")
-PRIVATE_KEY = os.getenv("PRIVATE_KEY", "")
 
-CEX_KEYWORDS = ['binance', 'okx', 'huobi', 'htx', 'gate', 'kucoin', 'bybit', 'mexc', 'bitfinex', 'coinbase', 'kraken', 'bitget', 'poloniex']
+DATABASE_FILE = os.getenv("DATABASE_FILE", "tron_monitor.db")
 
-found_pairs = []
-excluded_pairs = set()
-vanity_wallets = {}
-checked_wallets = set()
-TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+
+TRONSCAN_URL = "https://apilist.tronscanapi.com/api"
+TRONGRID_URL = "https://api.trongrid.io"
+
+CEX_KEYWORDS = [
+    "binance",
+    "okx",
+    "huobi",
+    "htx",
+    "gate",
+    "kucoin",
+    "bybit",
+    "mexc",
+    "bitfinex",
+    "coinbase",
+    "kraken",
+    "bitget",
+    "poloniex",
+]
+
+# ============================================================
+# LOGGING
+# ============================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+
+log = logging.getLogger("tron-monitor")
+
+# ============================================================
+# DATABASE
+# ============================================================
+
+db = sqlite3.connect(
+    DATABASE_FILE,
+    check_same_thread=False
+)
+
+db.row_factory = sqlite3.Row
+
+db.execute("""
+CREATE TABLE IF NOT EXISTS pairs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wallet_a TEXT NOT NULL,
+    wallet_b TEXT NOT NULL,
+    cex_name TEXT,
+    transfer_count INTEGER DEFAULT 0,
+    total_amount REAL DEFAULT 0,
+    cex_balance REAL DEFAULT 0,
+    first_seen TEXT,
+    last_seen TEXT,
+    qualified_at TEXT,
+    active INTEGER DEFAULT 1,
+    alerted INTEGER DEFAULT 0,
+    UNIQUE(wallet_a, wallet_b)
+)
+""")
+
+db.execute("""
+CREATE TABLE IF NOT EXISTS excluded_pairs (
+    pair_id INTEGER PRIMARY KEY,
+    excluded_at TEXT NOT NULL
+)
+""")
+
+db.execute("""
+CREATE TABLE IF NOT EXISTS monitored_wallets (
+    address TEXT PRIMARY KEY,
+    wallet_type TEXT,
+    pair_id INTEGER,
+    first_seen TEXT,
+    last_checked TEXT,
+    last_transaction_timestamp INTEGER DEFAULT 0
+)
+""")
+
+db.execute("""
+CREATE TABLE IF NOT EXISTS scan_state (
+    key TEXT PRIMARY KEY,
+    value TEXT
+)
+""")
+
+db.execute("""
+CREATE TABLE IF NOT EXISTS telegram_state (
+    key TEXT PRIMARY KEY,
+    value TEXT
+)
+""")
+
+db.commit()
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def utc_string():
+    return utc_now().isoformat()
+
+
+def telegram_escape(value):
+    return html.escape(str(value or ""))
+
+
+# ============================================================
+# TELEGRAM
+# ============================================================
+
+TELEGRAM_URL = (
+    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+    if TELEGRAM_BOT_TOKEN
+    else ""
+)
+
 
 def send_telegram(message):
+    if not TELEGRAM_URL or not CHAT_ID:
+        log.warning("Telegram is not configured.")
+        return False
+
     try:
-        requests.post(f"{TELEGRAM_URL}/sendMessage", json={"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
-    except: pass
+        response = requests.post(
+            f"{TELEGRAM_URL}/sendMessage",
+            json={
+                "chat_id": CHAT_ID,
+                "text": message,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
+            timeout=15,
+        )
+
+        if response.ok:
+            return True
+
+        log.warning(
+            "Telegram error %s: %s",
+            response.status_code,
+            response.text[:300]
+        )
+
+    except requests.RequestException as exc:
+        log.warning("Telegram request failed: %s", exc)
+
+    return False
+
+
+def get_telegram_offset():
+    row = db.execute(
+        "SELECT value FROM telegram_state WHERE key = 'offset'"
+    ).fetchone()
+
+    if not row:
+        return 0
+
+    try:
+        return int(row["value"])
+    except ValueError:
+        return 0
+
+
+def set_telegram_offset(offset):
+    db.execute("""
+        INSERT INTO telegram_state(key, value)
+        VALUES('offset', ?)
+        ON CONFLICT(key)
+        DO UPDATE SET value = excluded.value
+    """, (str(offset),))
+
+    db.commit()
+
+
+# ============================================================
+# API HEADERS
+# ============================================================
+
+def tronscan_headers():
+    if TRONSCAN_API_KEY:
+        return {
+            "TRON-PRO-API-KEY": TRONSCAN_API_KEY
+        }
+
+    return {}
+
+
+def trongrid_headers():
+    if TRONGRID_API_KEY:
+        return {
+            "TRON-PRO-API-KEY": TRONGRID_API_KEY
+        }
+
+    return {}
+
+
+# ============================================================
+# HTTP WITH RETRIES
+# ============================================================
+
+def http_get(url, params=None, headers=None, timeout=30, attempts=3):
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                headers=headers or {},
+                timeout=timeout,
+            )
+
+            if response.status_code == 429:
+                wait = min(10 * attempt, 30)
+                log.warning("Rate limited. Waiting %ss...", wait)
+                time.sleep(wait)
+                continue
+
+            response.raise_for_status()
+
+            return response.json()
+
+        except (
+            requests.RequestException,
+            ValueError,
+        ) as exc:
+            last_error = exc
+
+            if attempt < attempts:
+                time.sleep(min(2 * attempt, 10))
+
+    raise RuntimeError(
+        f"API request failed after {attempts} attempts: {last_error}"
+    )
+
+
+# ============================================================
+# TRON DATA
+# ============================================================
 
 def get_usdt_balance(address):
     try:
-        headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
-        r = requests.get(f"https://api.trongrid.io/v1/accounts/{address}/trc20/balance", 
-                         params={"contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"},
-                         headers=headers, timeout=10)
-        data = r.json()
-        if data.get("data"):
-            return int(data["data"][0].get("balance", 0)) / 1_000_000
-        return 0
-    except: return 0
+        data = http_get(
+            f"{TRONGRID_URL}/v1/accounts/{address}/trc20",
+            params={
+                "only_confirmed": "true",
+                "limit": 200,
+            },
+            headers=trongrid_headers(),
+            timeout=20,
+        )
+
+        for token in data.get("data", []):
+            token_address = (
+                token.get("token_info", {}).get("address")
+            )
+
+            if token_address == USDT_CONTRACT:
+                raw = int(token.get("balance", 0))
+                decimals = int(
+                    token.get("token_info", {}).get("decimals", 6)
+                )
+
+                return raw / (10 ** decimals)
+
+    except Exception as exc:
+        log.warning(
+            "Could not obtain USDT balance for %s: %s",
+            address,
+            exc
+        )
+
+    return 0.0
+
 
 def get_wallet_history(address, limit=10):
     try:
-        r = requests.get(
-            "https://apilist.tronscanapi.com/api/token_trc20/transfers",
-            params={"address": address, "limit": limit, "sort": "-timestamp"},
-            headers={"TRON-PRO-API-KEY": TRONSCAN_API_KEY} if TRONSCAN_API_KEY else {},
-            timeout=10
-        )
-        return r.json().get("token_transfers", [])
-    except: return []
-
-def generate_vanity_wallet(target_address, max_attempts=50000):
-    print(f"  🔨 Generating vanity...")
-    try:
-        from tronpy.keys import PrivateKey
-    except:
-        return None, None, 0, 0
-        
-    best_addr, best_key, best_score = None, None, 0
-    best_prefix, best_suffix = 0, 0
-    
-    for attempt in range(max_attempts):
-        key = PrivateKey.random()
-        addr = key.public_key.to_base58check_address()
-        
-        prefix_match = sum(1 for i in range(8) if i < len(addr) and i < len(target_address) and addr[i] == target_address[i])
-        suffix_match = sum(1 for i in range(1, 9) if i <= len(addr) and i <= len(target_address) and addr[-i] == target_address[-i])
-        total_score = prefix_match + suffix_match
-        
-        if total_score > best_score:
-            best_score = total_score
-            best_prefix = prefix_match
-            best_suffix = suffix_match
-            best_addr = addr
-            best_key = key.hex()
-            if best_score >= 8: break
-            
-    print(f"  ✅ {best_prefix}/8 + {best_suffix}/8 = {best_score}/16")
-    return best_addr, best_key, best_prefix, best_suffix
-
-send_telegram("🚀 <b>Persistent Scanner Started</b>\nScanning for 10 minutes MAX.\nRules: >$50/transfer, 2+ sends in 2 weeks.")
-
-# =========================
-# PERSISTENT SCANNING
-# =========================
-end_date = datetime.now(timezone.utc)
-start_date = end_date - timedelta(weeks=WEEKS_BACK)
-start_ms = int(start_date.timestamp() * 1000)
-end_ms = int(end_date.timestamp() * 1000)
-
-start_time = time.time()
-offset = 0
-batch_count = 0
-
-print("🔄 Starting persistent scan...")
-
-while len(found_pairs) < TARGET_PAIRS and (time.time() - start_time) < 600:
-    batch_count += 1
-    elapsed = int(time.time() - start_time)
-    
-    print(f"\n📊 Batch #{batch_count} | Time: {elapsed}s | Found: {len(found_pairs)}/{TARGET_PAIRS}")
-    
-    try:
-        r = requests.get(
-            "https://apilist.tronscanapi.com/api/token_trc20/transfers",
+        data = http_get(
+            f"{TRONSCAN_URL}/token_trc20/transfers",
             params={
-                "start": offset,
-                "limit": 100,
-                "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
-                "sort": "-timestamp"
+                "address": address,
+                "limit": limit,
+                "start": 0,
+                "sort": "-timestamp",
+                "contract_address": USDT_CONTRACT,
             },
-            headers={"TRON-PRO-API-KEY": TRONSCAN_API_KEY} if TRONSCAN_API_KEY else {},
-            timeout=30
+            headers=tronscan_headers(),
+            timeout=30,
         )
-        
-        transfers = r.json().get("token_transfers", [])
-        
-        if not transfers:
-            print("  ⚠️ No transfers, waiting 10s...")
+
+        return data.get("token_transfers", [])
+
+    except Exception as exc:
+        log.warning(
+            "History lookup failed for %s: %s",
+            address,
+            exc
+        )
+
+        return []
+
+
+def get_usdt_transfers(
+    start_timestamp=None,
+    end_timestamp=None,
+    start=0,
+    limit=100,
+):
+    params = {
+        "start": start,
+        "limit": limit,
+        "contract_address": USDT_CONTRACT,
+        "sort": "-timestamp",
+    }
+
+    if start_timestamp is not None:
+        params["start_timestamp"] = start_timestamp
+
+    if end_timestamp is not None:
+        params["end_timestamp"] = end_timestamp
+
+    return http_get(
+        f"{TRONSCAN_URL}/token_trc20/transfers",
+        params=params,
+        headers=tronscan_headers(),
+        timeout=30,
+    ).get("token_transfers", [])
+
+
+# ============================================================
+# TRANSACTION PARSING
+# ============================================================
+
+def transfer_amount(tx):
+    try:
+        raw = int(tx.get("quant", 0))
+    except (ValueError, TypeError):
+        return 0.0
+
+    return raw / 1_000_000
+
+
+def transaction_timestamp(tx):
+    return int(
+        tx.get("block_ts")
+        or tx.get("timestamp")
+        or 0
+    )
+
+
+def get_tag_name(tx):
+    tag = tx.get("from_address_tag")
+
+    if isinstance(tag, dict):
+        return (
+            tag.get("from_address_tag")
+            or tag.get("name")
+            or tag.get("tag")
+            or ""
+        )
+
+    if isinstance(tag, str):
+        return tag
+
+    return ""
+
+
+def detect_cex(tag):
+    normalized = tag.lower()
+
+    for keyword in CEX_KEYWORDS:
+        if keyword in normalized:
+            return True, tag
+
+    return False, tag or "Unknown"
+
+
+# ============================================================
+# PAIR DATABASE
+# ============================================================
+
+def pair_is_excluded(pair_id):
+    row = db.execute(
+        "SELECT 1 FROM excluded_pairs WHERE pair_id = ?",
+        (pair_id,)
+    ).fetchone()
+
+    return row is not None
+
+
+def save_pair(
+    wallet_a,
+    wallet_b,
+    cex_name,
+    transfer_count,
+    total_amount,
+    cex_balance,
+):
+    now = utc_string()
+
+    existing = db.execute("""
+        SELECT *
+        FROM pairs
+        WHERE wallet_a = ?
+          AND wallet_b = ?
+    """, (wallet_a, wallet_b)).fetchone()
+
+    if existing:
+        db.execute("""
+            UPDATE pairs
+            SET transfer_count = ?,
+                total_amount = ?,
+                cex_balance = ?,
+                cex_name = ?,
+                last_seen = ?
+            WHERE id = ?
+        """, (
+            transfer_count,
+            total_amount,
+            cex_balance,
+            cex_name,
+            now,
+            existing["id"],
+        ))
+
+        pair_id = existing["id"]
+        is_new = False
+
+    else:
+        cursor = db.execute("""
+            INSERT INTO pairs (
+                wallet_a,
+                wallet_b,
+                cex_name,
+                transfer_count,
+                total_amount,
+                cex_balance,
+                first_seen,
+                last_seen,
+                qualified_at,
+                active,
+                alerted
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0)
+        """, (
+            wallet_a,
+            wallet_b,
+            cex_name,
+            transfer_count,
+            total_amount,
+            cex_balance,
+            now,
+            now,
+            now,
+        ))
+
+        pair_id = cursor.lastrowid
+        is_new = True
+
+    db.execute("""
+        INSERT INTO monitored_wallets(
+            address,
+            wallet_type,
+            pair_id,
+            first_seen
+        )
+        VALUES (?, 'A', ?, ?)
+        ON CONFLICT(address) DO NOTHING
+    """, (wallet_a, pair_id, now))
+
+    db.execute("""
+        INSERT INTO monitored_wallets(
+            address,
+            wallet_type,
+            pair_id,
+            first_seen
+        )
+        VALUES (?, 'B', ?, ?)
+        ON CONFLICT(address) DO NOTHING
+    """, (wallet_b, pair_id, now))
+
+    db.commit()
+
+    return pair_id, is_new
+
+
+# ============================================================
+# PAIR QUALIFICATION
+# ============================================================
+
+def analyze_wallet(wallet_b, start_ms, end_ms):
+    history = get_wallet_history(wallet_b, limit=200)
+
+    by_sender = defaultdict(list)
+
+    for tx in history:
+        if tx.get("to_address") != wallet_b:
+            continue
+
+        from_address = tx.get("from_address")
+
+        if not from_address:
+            continue
+
+        amount = transfer_amount(tx)
+
+        if amount <= MIN_TRANSFER_USD:
+            continue
+
+        timestamp = transaction_timestamp(tx)
+
+        if timestamp:
+            if timestamp < start_ms or timestamp > end_ms:
+                continue
+
+        by_sender[from_address].append({
+            "amount": amount,
+            "timestamp": timestamp,
+            "tag": get_tag_name(tx),
+            "txid": (
+                tx.get("hash")
+                or tx.get("transaction_id")
+                or tx.get("txID")
+                or ""
+            ),
+        })
+
+    qualified = []
+
+    for wallet_a, transactions in by_sender.items():
+
+        if len(transactions) < 2:
+            continue
+
+        tags = [
+            tx["tag"]
+            for tx in transactions
+            if tx["tag"]
+        ]
+
+        tag_name = tags[0] if tags else ""
+
+        is_cex, cex_name = detect_cex(tag_name)
+
+        if not is_cex:
+            continue
+
+        total = sum(
+            tx["amount"]
+            for tx in transactions
+        )
+
+        balance = get_usdt_balance(wallet_a)
+
+        qualified.append({
+            "wallet_a": wallet_a,
+            "wallet_b": wallet_b,
+            "cex_name": cex_name,
+            "transfer_count": len(transactions),
+            "total_amount": total,
+            "cex_balance": balance,
+        })
+
+    return qualified
+
+
+# ============================================================
+# NEW PAIR ALERT
+# ============================================================
+
+def announce_pair(pair_id, pair):
+    status = "✅" if pair["cex_balance"] >= 500 else "⚠️"
+
+    message = (
+        f"{status} <b>Eligible Pair #{pair_id}</b>\n\n"
+        f"🏦 <b>CEX / Wallet A:</b>\n"
+        f"<code>{telegram_escape(pair['wallet_a'])}</code>\n\n"
+        f"🏷 <b>CEX Tag:</b> "
+        f"{telegram_escape(pair['cex_name'])}\n"
+        f"💰 <b>USDT Balance:</b> "
+        f"${pair['cex_balance']:,.2f}\n\n"
+        f"👤 <b>Wallet B:</b>\n"
+        f"<code>{telegram_escape(pair['wallet_b'])}</code>\n\n"
+        f"📊 <b>Transfers:</b> "
+        f"{pair['transfer_count']}x\n"
+        f"💵 <b>Total Volume:</b> "
+        f"${pair['total_amount']:,.2f}\n\n"
+        f"Historical qualification window: "
+        f"{WEEKS_BACK} week(s).\n"
+        f"Monitoring will continue after qualification."
+    )
+
+    send_telegram(message)
+
+
+# ============================================================
+# HISTORICAL SCANNER
+# ============================================================
+
+def historical_scan():
+    end_date = utc_now()
+    start_date = end_date - timedelta(weeks=WEEKS_BACK)
+
+    start_ms = int(start_date.timestamp() * 1000)
+    end_ms = int(end_date.timestamp() * 1000)
+
+    log.info(
+        "Historical scan: %s → %s",
+        start_date.isoformat(),
+        end_date.isoformat()
+    )
+
+    offset = 0
+    processed = 0
+
+    while True:
+
+        try:
+            transfers = get_usdt_transfers(
+                start_timestamp=start_ms,
+                end_timestamp=end_ms,
+                start=offset,
+                limit=100,
+            )
+
+        except Exception as exc:
+            log.error("Historical scan request failed: %s", exc)
             time.sleep(10)
             continue
-            
-        print(f"   Got {len(transfers)} transfers")
-        
+
+        if not transfers:
+            break
+
+        log.info(
+            "Historical batch: %s transfers",
+            len(transfers)
+        )
+
         receivers = set()
+
         for tx in transfers:
-            to_addr = tx.get("to_address")
-            if to_addr and to_addr not in checked_wallets:
-                receivers.add(to_addr)
-                
-        print(f"  Checking {len(receivers)} new wallets...")
-        
+            receiver = tx.get("to_address")
+
+            if receiver:
+                receivers.add(receiver)
+
         for wallet_b in receivers:
-            if len(found_pairs) >= TARGET_PAIRS: break
-            if (time.time() - start_time) >= 600: break
-            
-            checked_wallets.add(wallet_b)
-            
+
+            current_count = db.execute(
+                "SELECT COUNT(*) AS count FROM pairs"
+            ).fetchone()["count"]
+
+            if current_count >= TARGET_PAIRS:
+                return
+
             try:
-                r_hist = requests.get(
-                    "https://apilist.tronscanapi.com/api/token_trc20/transfers",
-                    params={
-                        "address": wallet_b, 
-                        "start_timestamp": start_ms, 
-                        "end_timestamp": end_ms,
-                        "limit": 200,
-                        "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
-                    },
-                    headers={"TRON-PRO-API-KEY": TRONSCAN_API_KEY} if TRONSCAN_API_KEY else {},
-                    timeout=30
+                results = analyze_wallet(
+                    wallet_b,
+                    start_ms,
+                    end_ms
                 )
-                
-                history = r_hist.json().get("token_transfers", [])
-                
-                by_sender = defaultdict(list)
-                for tx in history:
-                    if tx.get("to_address") == wallet_b:
-                        from_addr = tx.get("from_address")
-                        amount = int(tx.get("quant", 0)) / 1_000_000
-                        tag = tx.get("from_address_tag", {})
-                        
-                        if from_addr and amount > MIN_TRANSFER_USD:
-                            by_sender[from_addr].append({"amount": amount, "tag": tag})
-                
-                for wallet_a, tx_list in by_sender.items():
-                    if len(tx_list) >= 2:
-                        print(f"    🎯 Pattern: {wallet_a[:20]}... → {wallet_b[:20]}... ({len(tx_list)}x)")
-                        
-                        tag_name = tx_list[0]["tag"].get("from_address_tag", "").lower() if tx_list[0]["tag"] else ""
-                        is_cex = any(k in tag_name for k in CEX_KEYWORDS)
-                        cex_name = tx_list[0]["tag"].get("from_address_tag", "Unknown") if tx_list[0]["tag"] else "Unknown"
-                        
-                        if is_cex:
-                            cex_balance = get_usdt_balance(wallet_a)
-                            total_volume = sum(t["amount"] for t in tx_list)
-                            
-                            found_pairs.append({
-                                "wallet_a": wallet_a,
-                                "wallet_b": wallet_b,
-                                "cex_name": cex_name,
-                                "transfer_count": len(tx_list),
-                                "total_amount": total_volume,
-                                "cex_balance": cex_balance
-                            })
-                            
-                            status = "✅" if cex_balance >= 500 else "⚠️"
-                            
-                            msg = (f"{status} <b>Pair #{len(found_pairs)}</b>\n\n"
-                                   f"🏦 <b>CEX ({cex_name}):</b>\n<code>{wallet_a}</code>\n"
-                                   f" Balance: ${cex_balance:,.2f}\n\n"
-                                   f"👤 <b>Private:</b>\n<code>{wallet_b}</code>\n\n"
-                                   f"📊 Sent {len(tx_list)}x | Vol: ${total_volume:,.2f}")
-                            
-                            send_telegram(msg)
-                            print(f"    ✅ Pair #{len(found_pairs)}!")
-                                
-            except Exception as e:
-                print(f"    ❌ Error: {e}")
-                continue
-            
-            time.sleep(0.3)
-            
-        offset += 100
-        
-        if len(found_pairs) < TARGET_PAIRS and (time.time() - start_time) < 600:
-            print(f"  ⏳ Waiting 10s...")
-            time.sleep(10)
-            
-    except Exception as e:
-        print(f"❌ Batch error: {e}")
-        time.sleep(10)
 
-# =========================
-# INTERACTIVE MODE
-# =========================
+                for pair in results:
+
+                    pair_id, is_new = save_pair(
+                        pair["wallet_a"],
+                        pair["wallet_b"],
+                        pair["cex_name"],
+                        pair["transfer_count"],
+                        pair["total_amount"],
+                        pair["cex_balance"],
+                    )
+
+                    if is_new:
+                        log.info(
+                            "Eligible pair found: #%s",
+                            pair_id
+                        )
+
+                        announce_pair(
+                            pair_id,
+                            pair
+                        )
+
+            except Exception as exc:
+                log.warning(
+                    "Could not analyze %s: %s",
+                    wallet_b,
+                    exc
+                )
+
+            time.sleep(0.2)
+
+        processed += len(transfers)
+        offset += len(transfers)
+
+        if len(transfers) < 100:
+            break
+
+        log.info(
+            "Historical progress: %s transfers",
+            processed
+        )
+
+    log.info("Historical scan completed.")
+
+
+# ============================================================
+# ONGOING MONITORING
+# ============================================================
+
 def get_active_pairs():
-    return [p for i, p in enumerate(found_pairs) if (i+1) not in excluded_pairs]
+    return db.execute("""
+        SELECT *
+        FROM pairs
+        WHERE active = 1
+        ORDER BY id
+    """).fetchall()
 
-def calc_cost():
-    return len(get_active_pairs()) * 2.2
 
-if found_pairs:
-    send_telegram(f"🎯 <b>Found {len(found_pairs)} pairs!</b>\n\n"
-                 f"<b>Commands:</b>\n"
-                 f"• <b>info</b> - Show all pairs\n"
-                 f"• <b>exclude [1-5]</b> - Remove pair\n"
-                 f"• <b>history [wallet]</b> - Check transactions\n"
-                 f"• <b>cost</b> - Gas estimate\n"
-                 f"• <b>vanity [ID] [Pair#]</b> - Create vanity (mimics Wallet B)\n"
-                 f"• <b>vanity [ID]</b> - Check vanity status\n"
-                 f"• <b>transfer</b> - Execute transfers")
-else:
-    send_telegram("⚠️ <b>No pairs found in 10 minutes.</b>\nTry running again.")
+def monitor_pair(pair):
+    wallet_a = pair["wallet_a"]
+    wallet_b = pair["wallet_b"]
 
-last_id = 0
-wait_start = time.time()
+    last_checked = db.execute("""
+        SELECT last_transaction_timestamp
+        FROM monitored_wallets
+        WHERE address = ?
+    """, (wallet_b,)).fetchone()
 
-# Wait up to 5 minutes for commands
-while (time.time() - wait_start) < 300:
+    previous_timestamp = (
+        int(last_checked["last_transaction_timestamp"])
+        if last_checked
+        else 0
+    )
+
     try:
-        updates = requests.get(f"{TELEGRAM_URL}/getUpdates", params={"offset": last_id, "timeout": 30}, timeout=35).json().get("result", [])
-    except:
-        updates = []
-    
-    for u in updates:
-        last_id = u["update_id"] + 1
-        
-        if u.get("message") and str(u["message"]["chat"]["id"]) == str(CHAT_ID):
-            text = u["message"].get("text", "").strip()
-            parts = text.lower().split()
-            
-            if parts[0] == "info":
-                if not found_pairs:
-                    send_telegram("No pairs found")
-                else:
-                    active = get_active_pairs()
-                    msg = f" <b>Pairs ({len(active)}/{len(found_pairs)} active)</b>\n"
-                    if excluded_pairs: msg += f"<i>Excluded: {sorted(excluded_pairs)}</i>\n\n"
-                    for i, p in enumerate(found_pairs):
-                        status = "" if (i+1) in excluded_pairs else "✅"
-                        msg += f"<b>#{i+1} {status} {p['cex_name']}</b>\n"
-                        msg += f"🏦 Wallet A: <code>{p['wallet_a']}</code>\n"
-                        msg += f"💼 CEX Balance: ${p['cex_balance']:,.2f}\n"
-                        msg += f"👤 Wallet B: <code>{p['wallet_b']}</code>\n"
-                        msg += f"📊 {p['transfer_count']}x | Vol: ${p['total_amount']}\n\n"
-                    send_telegram(msg)
-            
-            elif parts[0] == "exclude" and len(parts) > 1:
-                try:
-                    num = int(parts[1])
-                    if 1 <= num <= len(found_pairs):
-                        excluded_pairs.add(num)
-                        send_telegram(f"🗑️ <b>Pair #{num} excluded</b>")
-                except: send_telegram("❌ Use: <code>exclude 1</code>")
-            
-            elif parts[0] == "history" and len(parts) > 1:
-                addr = parts[1]
-                send_telegram(f"🔍 <b>History:</b>\n<code>{addr[:30]}...</code>")
-                txs = get_wallet_history(addr, 10)
-                if txs:
-                    msg = " <b>Last 10 Transactions</b>\n\n"
-                    for i, tx in enumerate(txs[:10]):
-                        amount = int(tx.get("quant", 0)) / 1_000_000
-                        from_addr = tx.get("from_address", "Unknown")
-                        date = datetime.fromtimestamp(tx.get("block_ts", 0)/1000).strftime("%m/%d %H:%M")
-                        msg += f"<b>#{i+1}</b> {date}\n💰 ${amount:,.2f}\nFrom: <code>{from_addr[:20]}...</code>\n\n"
-                    send_telegram(msg)
-                else: send_telegram(" No transactions")
-            
-            elif parts[0] == "cost":
-                total = calc_cost()
-                active = len(get_active_pairs())
-                send_telegram(f"💰 <b>Gas Estimate</b>\n\nActive pairs: {active}\nCost: {total} TRX (~${total * 0.15:.2f})")
-            
-            elif parts[0] == "vanity" and len(parts) >= 2:
-                try:
-                    vid = int(parts[1])
-                    if len(parts) == 3 and parts[2].isdigit():
-                        p_num = int(parts[2]) - 1
-                        if 0 <= p_num < len(found_pairs):
-                            addr, key, prefix, suffix = generate_vanity_wallet(found_pairs[p_num]['wallet_b'])
-                            if not addr:
-                                send_telegram("❌ Error generating vanity.")
-                                continue
-                            vanity_wallets[vid] = {
-                                "address": addr, "private_key": key,
-                                "target_pair": p_num+1, "target_wallet_b": found_pairs[p_num]['wallet_b'],
-                                "prefix_match": prefix, "suffix_match": suffix,
-                                "alert_active": False, "last_balance": 0
-                            }
-                            send_telegram(f"✅ <b>Vanity #{vid} Created</b>\n\n"
-                                        f"<b>Mimics Wallet B:</b>\n<code>{found_pairs[p_num]['wallet_b']}</code>\n\n"
-                                        f"<b>Vanity Address:</b>\n<code>{addr}</code>\n\n"
-                                        f"<b>Similarity:</b>\n• Prefix: {prefix}/8\n• Suffix: {suffix}/8\n• Total: {prefix+suffix}/16\n\n"
-                                        f"Type <code>vanity {vid} alert</code> to enable alerts")
-                    elif len(parts) == 3 and parts[2] == "alert":
-                        if vid in vanity_wallets:
-                            vanity_wallets[vid]["alert_active"] = True
-                            send_telegram(f"🔔 <b>Alerts ON for #{vid}</b>")
-                    elif len(parts) == 2:
-                        if vid in vanity_wallets:
-                            v = vanity_wallets[vid]
-                            try:
-                                headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY} if TRONGRID_API_KEY else {}
-                                r_trx = requests.get(f"https://api.trongrid.io/v1/accounts/{v['address']}", params={"only_confirmed": "true"}, headers=headers, timeout=10)
-                                trx_bal = int(r_trx.json().get("data", [{}])[0].get("balance", 0)) / 1_000_000 if r_trx.json().get("data") else 0
-                                
-                                if trx_bal > v["last_balance"] and v["alert_active"]:
-                                    send_telegram(f"🚨 <b>ALERT: Vanity #{vid} Received Funds!</b>\n\n<b>Address:</b> <code>{v['address']}</code>\n<b>TRX:</b> {trx_bal:.6f}\n⚠️ <b>Private Key:</b> <code>{v['private_key']}</code>")
-                                    v["last_balance"] = trx_bal
-                                
-                                send_telegram(f" <b>Vanity #{vid}</b>\n\n<b>Address:</b> <code>{v['address']}</code>\n<b>Private Key:</b> <code>{v['private_key']}</code>\n\n<b>Mimics:</b> <code>{v['target_wallet_b'][:30]}...</code>\n<b>Similarity:</b> {v['prefix_match']}/{v['suffix_match']}\n\n<b>TRX Balance:</b> {trx_bal:.6f}\n<b>Alerts:</b> {'🔔 ON' if v['alert_active'] else '🔕 OFF'}")
-                            except Exception as e: send_telegram(f"❌ Error: {e}")
-                        else: send_telegram(f"❌ Vanity #{vid} not found")
-                except Exception as e: send_telegram(f"❌ Error: {e}")
-            
-            elif parts[0] == "transfer":
-                active = get_active_pairs()
-                if not active:
-                    send_telegram(" No active pairs")
-                else:
-                    send_telegram(f"🚀 <b>Executing {len(active)} transfers...</b>\nCost: ~{calc_cost()} TRX")
-                    try:
-                        from tronpy import Tron
-                        from tronpy.keys import PrivateKey
-                        tron = Tron()
-                        priv = PrivateKey(bytes.fromhex(PRIVATE_KEY.replace('0x', '')))
-                        main_addr = priv.public_key.to_base58check_address()
-                        
-                        pair_num = 1
-                        for i, pair in enumerate(found_pairs):
-                            if (i+1) in excluded_pairs: continue
-                            
-                            v_key = None
-                            for vid, v in vanity_wallets.items():
-                                if v["target_pair"] == i + 1:
-                                    v_key = PrivateKey(bytes.fromhex(v['private_key']))
-                                    v_addr = v['address']
-                                    break
-                            if not v_key:
-                                v_key = PrivateKey.random()
-                                v_addr = v_key.public_key.to_base58check_address()
-                            
-                            tx1 = tron.trx.transfer(main_addr, v_addr, 1).build().sign(priv).broadcast().txid
-                            time.sleep(3)
-                            tx2 = tron.trx.transfer(v_addr, pair['wallet_a'], 1).build().sign(v_key).broadcast().txid
-                            
-                            send_telegram(f"✅ <b>#{pair_num}</b>\nTX1: <code>{tx1}</code>\nTX2: <code>{tx2}</code>")
-                            pair_num += 1
-                            time.sleep(5)
-                        send_telegram("✅ <b>All transfers completed!</b>")
-                    except Exception as e: send_telegram(f"❌ Error: {e}")
-                    break
+        history = get_wallet_history(
+            wallet_b,
+            limit=50
+        )
 
-    time.sleep(5)
+        newest_timestamp = previous_timestamp
 
-print("✅ Script finished - exiting")
+        for tx in history:
+
+            timestamp = transaction_timestamp(tx)
+
+            if timestamp > newest_timestamp:
+                newest_timestamp = timestamp
+
+            if timestamp <= previous_timestamp:
+                continue
+
+            if tx.get("to_address") != wallet_b:
+                continue
+
+            if tx.get("from_address") != wallet_a:
+                continue
+
+            amount = transfer_amount(tx)
+
+            if amount <= 0:
+                continue
+
+            txid = (
+                tx.get("hash")
+                or tx.get("transaction_id")
+                or tx.get("txID")
+                or "unknown"
+            )
+
+            send_telegram(
+                f"🔔 <b>New A → B USDT Transaction</b>\n\n"
+                f"<b>Pair:</b> #{pair['id']}\n"
+                f"<b>Wallet A:</b>\n"
+                f"<code>{telegram_escape(wallet_a)}</code>\n\n"
+                f"<b>Wallet B:</b>\n"
+                f"<code>{telegram_escape(wallet_b)}</code>\n\n"
+                f"<b>Amount:</b> ${amount:,.2f}\n"
+                f"<b>TX:</b> <code>{telegram_escape(txid)}</code>"
+            )
+
+        db.execute("""
+            UPDATE monitored_wallets
+            SET last_checked = ?,
+                last_transaction_timestamp = ?
+            WHERE address = ?
+        """, (
+            utc_string(),
+            newest_timestamp,
+            wallet_b,
+        ))
+
+        db.commit()
+
+    except Exception as exc:
+        log.warning(
+            "Monitoring failed for pair #%s: %s",
+            pair["id"],
+            exc
+        )
+
+
+def monitor_wallets():
+    pairs = get_active_pairs()
+
+    for pair in pairs:
+        if pair_is_excluded(pair["id"]):
+            continue
+
+        monitor_pair(pair)
+
+
+# ============================================================
+# TELEGRAM COMMANDS
+# ============================================================
+
+def format_pair(pair):
+    excluded = pair_is_excluded(pair["id"])
+    status = "🚫 EXCLUDED" if excluded else "✅ ACTIVE"
+
+    return (
+        f"<b>#{pair['id']} — {status}</b>\n"
+        f"CEX: {telegram_escape(pair['cex_name'])}\n"
+        f"Wallet A:\n"
+        f"<code>{telegram_escape(pair['wallet_a'])}</code>\n"
+        f"Wallet A USDT: ${pair['cex_balance']:,.2f}\n\n"
+        f"Wallet B:\n"
+        f"<code>{telegram_escape(pair['wallet_b'])}</code>\n\n"
+        f"Transfers: {pair['transfer_count']}x\n"
+        f"Volume: ${pair['total_amount']:,.2f}\n"
+    )
+
+
+def command_info():
+    pairs = db.execute("""
+        SELECT *
+        FROM pairs
+        ORDER BY id
+    """).fetchall()
+
+    if not pairs:
+        send_telegram("No eligible pairs have been discovered yet.")
+        return
+
+    active = [
+        p for p in pairs
+        if not pair_is_excluded(p["id"])
+    ]
+
+    message = (
+        f"<b>Wallet Pairs</b>\n"
+        f"Active: {len(active)}/{len(pairs)}\n\n"
+    )
+
+    for pair in pairs:
+        message += format_pair(pair) + "\n"
+
+    send_telegram(message)
+
+
+def command_exclude(parts):
+    if len(parts) < 2:
+        send_telegram(
+            "Usage: <code>exclude 1</code>"
+        )
+        return
+
+    try:
+        pair_id = int(parts[1])
+    except ValueError:
+        send_telegram("Pair number must be a number.")
+        return
+
+    pair = db.execute(
+        "SELECT id FROM pairs WHERE id = ?",
+        (pair_id,)
+    ).fetchone()
+
+    if not pair:
+        send_telegram(
+            f"Pair #{pair_id} was not found."
+        )
+        return
+
+    db.execute("""
+        INSERT OR REPLACE INTO excluded_pairs(
+            pair_id,
+            excluded_at
+        )
+        VALUES (?, ?)
+    """, (
+        pair_id,
+        utc_string()
+    ))
+
+    db.commit()
+
+    send_telegram(
+        f"🗑️ <b>Pair #{pair_id} excluded.</b>"
+    )
+
+
+def command_history(parts):
+    if len(parts) < 2:
+        send_telegram(
+            "Usage: <code>history WALLET_ADDRESS</code>"
+        )
+        return
+
+    address = parts[1].strip()
+
+    txs = get_wallet_history(
+        address,
+        limit=10
+    )
+
+    if not txs:
+        send_telegram(
+            "No USDT transactions were found."
+        )
+        return
+
+    message = (
+        f"🔍 <b>Last 10 USDT Transactions</b>\n"
+        f"<code>{telegram_escape(address)}</code>\n\n"
+    )
+
+    for index, tx in enumerate(txs[:10], 1):
+        amount = transfer_amount(tx)
+
+        from_address = tx.get(
+            "from_address",
+            "Unknown"
+        )
+
+        to_address = tx.get(
+            "to_address",
+            "Unknown"
+        )
+
+        timestamp = transaction_timestamp(tx)
+
+        if timestamp:
+            date = datetime.fromtimestamp(
+                timestamp / 1000,
+                timezone.utc
+            ).strftime("%Y-%m-%d %H:%M UTC")
+        else:
+            date = "Unknown"
+
+        message += (
+            f"<b>#{index}</b> {date}\n"
+            f"💰 ${amount:,.2f}\n"
+            f"From: <code>{telegram_escape(from_address)}</code>\n"
+            f"To: <code>{telegram_escape(to_address)}</code>\n\n"
+        )
+
+    send_telegram(message)
+
+
+def command_cost():
+    active = len([
+        p for p in get_active_pairs()
+        if not pair_is_excluded(p["id"])
+    ])
+
+    estimated_trx = active * 2.2
+
+    send_telegram(
+        f"💰 <b>Informational Cost Estimate</b>\n\n"
+        f"Active pairs: {active}\n"
+        f"Estimated network cost: "
+        f"~{estimated_trx:.2f} TRX\n\n"
+        f"No transactions are executed by this bot."
+    )
+
+
+def command_status():
+    pairs = db.execute(
+        "SELECT COUNT(*) AS count FROM pairs"
+    ).fetchone()["count"]
+
+    wallets = db.execute(
+        "SELECT COUNT(*) AS count FROM monitored_wallets"
+    ).fetchone()["count"]
+
+    excluded = db.execute(
+        "SELECT COUNT(*) AS count FROM excluded_pairs"
+    ).fetchone()["count"]
+
+    send_telegram(
+        f"🤖 <b>Monitor Status</b>\n\n"
+        f"Eligible pairs: {pairs}\n"
+        f"Monitored wallets: {wallets}\n"
+        f"Excluded pairs: {excluded}\n"
+        f"Lookback: {WEEKS_BACK} week(s)\n"
+        f"Minimum transfer: ${MIN_TRANSFER_USD:,.2f}\n"
+        f"Target pairs: {TARGET_PAIRS}"
+    )
+
+
+def handle_command(text):
+    parts = text.strip().split()
+
+    if not parts:
+        return
+
+    command = parts[0].lower().lstrip("/")
+
+    if command == "info":
+        command_info()
+
+    elif command == "exclude":
+        command_exclude(parts)
+
+    elif command == "history":
+        command_history(parts)
+
+    elif command == "cost":
+        command_cost()
+
+    elif command == "status":
+        command_status()
+
+    elif command == "help":
+        send_telegram(
+            "<b>Available commands</b>\n\n"
+            "<code>info</code> — Show discovered pairs\n"
+            "<code>exclude 1</code> — Exclude a pair\n"
+            "<code>history WALLET</code> — Show recent USDT history\n"
+            "<code>cost</code> — Informational cost estimate\n"
+            "<code>status</code> — Monitor status\n"
+            "<code>help</code> — Show commands"
+        )
+
+
+# ============================================================
+# TELEGRAM POLLING
+# ============================================================
+
+def poll_telegram():
+    if not TELEGRAM_URL or not CHAT_ID:
+        return
+
+    offset = get_telegram_offset()
+
+    try:
+        data = http_get(
+            f"{TELEGRAM_URL}/getUpdates",
+            params={
+                "offset": offset,
+                "timeout": 5,
+                "allowed_updates": ["message"],
+            },
+            timeout=10,
+            attempts=2,
+        )
+
+    except Exception as exc:
+        log.warning(
+            "Telegram polling failed: %s",
+            exc
+        )
+        return
+
+    updates = data.get("result", [])
+
+    for update in updates:
+        update_id = update.get("update_id")
+
+        if update_id is not None:
+            set_telegram_offset(
+                int(update_id) + 1
+            )
+
+        message = update.get("message")
+
+        if not message:
+            continue
+
+        chat_id = str(
+            message.get("chat", {}).get("id", "")
+        )
+
+        if chat_id != str(CHAT_ID):
+            continue
+
+        text = message.get("text", "").strip()
+
+        if text:
+            try:
+                handle_command(text)
+            except Exception as exc:
+                log.exception(
+                    "Command failed: %s",
+                    exc
+                )
+
+                send_telegram(
+                    "❌ An error occurred while processing that command."
+                )
+
+
+# ============================================================
+# STARTUP
+# ============================================================
+
+def startup_message():
+    send_telegram(
+        "🚀 <b>TRON Wallet Monitor Started</b>\n\n"
+        f"Historical lookback: {WEEKS_BACK} week(s)\n"
+        f"Minimum transfer: ${MIN_TRANSFER_USD:,.2f}\n"
+        f"Required transfers: 2+\n"
+        f"Target pairs: {TARGET_PAIRS}\n\n"
+        "Historical qualification and ongoing monitoring are active."
+    )
+
+
+# ============================================================
+# MAIN LOOP
+# ============================================================
+
+def main():
+
+    if not TRONSCAN_API_KEY:
+        log.warning(
+            "TRONSCAN_API_KEY is not configured."
+        )
+
+    if not TRONGRID_API_KEY:
+        log.warning(
+            "TRONGRID_API_KEY is not configured."
+        )
+
+    if not TELEGRAM_BOT_TOKEN:
+        log.warning(
+            "TELEGRAM_BOT_TOKEN is not configured."
+        )
+
+    if not CHAT_ID:
+        log.warning(
+            "CHAT_ID is not configured."
+        )
+
+    startup_message()
+
+    # Historical qualification
+    try:
+        historical_scan()
+    except Exception as exc:
+        log.exception(
+            "Historical scan crashed: %s",
+            exc
+        )
+
+    # Continuous monitoring
+    last_monitor = 0
+
+    log.info(
+        "Entering continuous monitoring mode."
+    )
+
+    while True:
+        current_time = time.time()
+
+        # Keep Telegram responsive
+        poll_telegram()
+
+        if (
+            current_time - last_monitor
+            >= MONITOR_INTERVAL
+        ):
+            try:
+                monitor_wallets()
+            except Exception as exc:
+                log.exception(
+                    "Monitoring cycle failed: %s",
+                    exc
+                )
+
+            last_monitor = current_time
+
+        time.sleep(2)
+
+
+# ============================================================
+# RUN
+# ============================================================
+
+if __name__ == "__main__":
+    try:
+        main()
+
+    except KeyboardInterrupt:
+        log.info(
+            "Monitor stopped by user."
+        )
+
+    except Exception as exc:
+        log.exception(
+            "Fatal error: %s",
+            exc
+        )
+
+    finally:
+        db.close()
