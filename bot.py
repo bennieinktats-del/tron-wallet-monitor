@@ -8,12 +8,13 @@ import requests
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
+
 # ============================================================
 # TRON WALLET MONITOR
-# Persistent historical qualification + ongoing monitoring
 # ============================================================
 
 print("🚀 Starting Persistent TRON Wallet Monitor...")
+
 
 # ============================================================
 # CONFIGURATION
@@ -23,21 +24,46 @@ TARGET_PAIRS = int(os.getenv("TARGET_PAIRS", "5"))
 MIN_TRANSFER_USD = float(os.getenv("MIN_TRANSFER_USD", "50"))
 WEEKS_BACK = int(os.getenv("WEEKS_BACK", "2"))
 
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "60"))
-MONITOR_INTERVAL = int(os.getenv("MONITOR_INTERVAL", "120"))
+MONITOR_INTERVAL = int(
+    os.getenv("MONITOR_INTERVAL", "120")
+)
 
-TRONSCAN_API_KEY = os.getenv("TRONSCAN_API_KEY", "")
-TRONGRID_API_KEY = os.getenv("TRONGRID_API_KEY", "")
+TRONSCAN_API_KEY = os.getenv(
+    "TRONSCAN_API_KEY",
+    ""
+)
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID = os.getenv("CHAT_ID", "")
+TRONGRID_API_KEY = os.getenv(
+    "TRONGRID_API_KEY",
+    ""
+)
 
-DATABASE_FILE = os.getenv("DATABASE_FILE", "tron_monitor.db")
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    ""
+)
 
-USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+CHAT_ID = os.getenv(
+    "CHAT_ID",
+    ""
+)
 
-TRONSCAN_URL = "https://apilist.tronscanapi.com/api"
-TRONGRID_URL = "https://api.trongrid.io"
+DATABASE_FILE = os.getenv(
+    "DATABASE_FILE",
+    "tron_monitor.db"
+)
+
+USDT_CONTRACT = (
+    "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+)
+
+TRONSCAN_URL = (
+    "https://apilist.tronscanapi.com/api"
+)
+
+TRONGRID_URL = (
+    "https://api.trongrid.io"
+)
 
 CEX_KEYWORDS = [
     "binance",
@@ -55,6 +81,7 @@ CEX_KEYWORDS = [
     "poloniex",
 ]
 
+
 # ============================================================
 # LOGGING
 # ============================================================
@@ -64,7 +91,10 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-log = logging.getLogger("tron-monitor")
+log = logging.getLogger(
+    "tron-monitor"
+)
+
 
 # ============================================================
 # DATABASE
@@ -76,6 +106,7 @@ db = sqlite3.connect(
 )
 
 db.row_factory = sqlite3.Row
+
 
 db.execute("""
 CREATE TABLE IF NOT EXISTS pairs (
@@ -95,12 +126,14 @@ CREATE TABLE IF NOT EXISTS pairs (
 )
 """)
 
+
 db.execute("""
 CREATE TABLE IF NOT EXISTS excluded_pairs (
     pair_id INTEGER PRIMARY KEY,
     excluded_at TEXT NOT NULL
 )
 """)
+
 
 db.execute("""
 CREATE TABLE IF NOT EXISTS monitored_wallets (
@@ -113,12 +146,14 @@ CREATE TABLE IF NOT EXISTS monitored_wallets (
 )
 """)
 
+
 db.execute("""
 CREATE TABLE IF NOT EXISTS scan_state (
     key TEXT PRIMARY KEY,
     value TEXT
 )
 """)
+
 
 db.execute("""
 CREATE TABLE IF NOT EXISTS telegram_state (
@@ -127,7 +162,9 @@ CREATE TABLE IF NOT EXISTS telegram_state (
 )
 """)
 
+
 db.commit()
+
 
 # ============================================================
 # HELPERS
@@ -142,7 +179,18 @@ def utc_string():
 
 
 def telegram_escape(value):
-    return html.escape(str(value or ""))
+    return html.escape(
+        str(value or "")
+    )
+
+
+def transaction_id(tx):
+    return (
+        tx.get("hash")
+        or tx.get("transaction_id")
+        or tx.get("txID")
+        or ""
+    )
 
 
 # ============================================================
@@ -157,11 +205,15 @@ TELEGRAM_URL = (
 
 
 def send_telegram(message):
+
     if not TELEGRAM_URL or not CHAT_ID:
-        log.warning("Telegram is not configured.")
+        log.warning(
+            "Telegram is not configured."
+        )
         return False
 
     try:
+
         response = requests.post(
             f"{TELEGRAM_URL}/sendMessage",
             json={
@@ -183,6 +235,7 @@ def send_telegram(message):
         )
 
     except requests.RequestException as exc:
+
         log.warning(
             "Telegram request failed: %s",
             exc
@@ -192,26 +245,42 @@ def send_telegram(message):
 
 
 def get_telegram_offset():
+
     row = db.execute(
-        "SELECT value FROM telegram_state WHERE key = 'offset'"
+        """
+        SELECT value
+        FROM telegram_state
+        WHERE key = 'offset'
+        """
     ).fetchone()
 
     if not row:
         return 0
 
     try:
-        return int(row["value"])
-    except (ValueError, TypeError):
+        return int(
+            row["value"]
+        )
+    except (
+        ValueError,
+        TypeError
+    ):
         return 0
 
 
 def set_telegram_offset(offset):
-    db.execute("""
+
+    db.execute(
+        """
         INSERT INTO telegram_state(key, value)
         VALUES('offset', ?)
         ON CONFLICT(key)
         DO UPDATE SET value = excluded.value
-    """, (str(offset),))
+        """,
+        (
+            str(offset),
+        )
+    )
 
     db.commit()
 
@@ -221,25 +290,29 @@ def set_telegram_offset(offset):
 # ============================================================
 
 def tronscan_headers():
+
     if TRONSCAN_API_KEY:
         return {
-            "TRON-PRO-API-KEY": TRONSCAN_API_KEY
+            "TRON-PRO-API-KEY":
+                TRONSCAN_API_KEY
         }
 
     return {}
 
 
 def trongrid_headers():
+
     if TRONGRID_API_KEY:
         return {
-            "TRON-PRO-API-KEY": TRONGRID_API_KEY
+            "TRON-PRO-API-KEY":
+                TRONGRID_API_KEY
         }
 
     return {}
 
 
 # ============================================================
-# HTTP WITH RETRIES
+# HTTP
 # ============================================================
 
 def http_get(
@@ -249,10 +322,16 @@ def http_get(
     timeout=30,
     attempts=3
 ):
+
     last_error = None
 
-    for attempt in range(1, attempts + 1):
+    for attempt in range(
+        1,
+        attempts + 1
+    ):
+
         try:
+
             response = requests.get(
                 url,
                 params=params,
@@ -261,7 +340,11 @@ def http_get(
             )
 
             if response.status_code == 429:
-                wait = min(10 * attempt, 30)
+
+                wait = min(
+                    10 * attempt,
+                    30
+                )
 
                 log.warning(
                     "Rate limited. Waiting %ss...",
@@ -283,26 +366,32 @@ def http_get(
             last_error = exc
 
             if attempt < attempts:
+
                 time.sleep(
-                    min(2 * attempt, 10)
+                    min(
+                        2 * attempt,
+                        10
+                    )
                 )
 
     raise RuntimeError(
-        f"API request failed after {attempts} attempts: "
+        f"API request failed after "
+        f"{attempts} attempts: "
         f"{last_error}"
     )
 
 
 # ============================================================
-# TRONSCAN TRANSFERS
+# TRONSCAN GLOBAL TRANSFER PAGE
 # ============================================================
 
-def get_usdt_transfers(
+def get_usdt_transfer_page(
     start_timestamp=None,
     end_timestamp=None,
     start=0,
     limit=50,
 ):
+
     params = {
         "start": start,
         "limit": limit,
@@ -311,16 +400,35 @@ def get_usdt_transfers(
     }
 
     if start_timestamp is not None:
-        params["start_timestamp"] = start_timestamp
+        params[
+            "start_timestamp"
+        ] = start_timestamp
 
     if end_timestamp is not None:
-        params["end_timestamp"] = end_timestamp
+        params[
+            "end_timestamp"
+        ] = end_timestamp
 
-    data = http_get(
+    return http_get(
         f"{TRONSCAN_URL}/token_trc20/transfers",
         params=params,
         headers=tronscan_headers(),
         timeout=30,
+    )
+
+
+def get_usdt_transfers(
+    start_timestamp=None,
+    end_timestamp=None,
+    start=0,
+    limit=50,
+):
+
+    data = get_usdt_transfer_page(
+        start_timestamp=start_timestamp,
+        end_timestamp=end_timestamp,
+        start=start,
+        limit=limit,
     )
 
     return data.get(
@@ -329,12 +437,18 @@ def get_usdt_transfers(
     )
 
 
+# ============================================================
+# WALLET HISTORY
+# ============================================================
+
 def get_wallet_history(
     address,
     limit=50,
     start=0
 ):
+
     try:
+
         data = http_get(
             f"{TRONSCAN_URL}/token_trc20/transfers",
             params={
@@ -342,7 +456,8 @@ def get_wallet_history(
                 "limit": limit,
                 "start": start,
                 "sort": "-timestamp",
-                "contract_address": USDT_CONTRACT,
+                "contract_address":
+                    USDT_CONTRACT,
             },
             headers=tronscan_headers(),
             timeout=30,
@@ -354,6 +469,7 @@ def get_wallet_history(
         )
 
     except Exception as exc:
+
         log.warning(
             "History lookup failed for %s: %s",
             address,
@@ -368,7 +484,9 @@ def get_wallet_history(
 # ============================================================
 
 def get_usdt_balance(address):
+
     try:
+
         data = http_get(
             f"{TRONGRID_URL}/v1/accounts/{address}/trc20",
             params={
@@ -384,42 +502,41 @@ def get_usdt_balance(address):
             []
         ):
 
-            token_address = (
+            token_info = token.get(
+                "token_info",
+                {}
+            )
+
+            token_address = token_info.get(
+                "address"
+            )
+
+            if token_address != USDT_CONTRACT:
+                continue
+
+            raw = int(
                 token.get(
-                    "token_info",
-                    {}
-                ).get(
-                    "address"
+                    "balance",
+                    0
                 )
             )
 
-            if token_address == USDT_CONTRACT:
-
-                raw = int(
-                    token.get(
-                        "balance",
-                        0
-                    )
+            decimals = int(
+                token_info.get(
+                    "decimals",
+                    6
                 )
+            )
 
-                decimals = int(
-                    token.get(
-                        "token_info",
-                        {}
-                    ).get(
-                        "decimals",
-                        6
-                    )
-                )
-
-                return raw / (
-                    10 ** decimals
-                )
+            return raw / (
+                10 ** decimals
+            )
 
     except Exception as exc:
 
         log.warning(
-            "Could not obtain USDT balance for %s: %s",
+            "Could not obtain USDT balance "
+            "for %s: %s",
             address,
             exc
         )
@@ -432,7 +549,9 @@ def get_usdt_balance(address):
 # ============================================================
 
 def transfer_amount(tx):
+
     try:
+
         raw = int(
             tx.get(
                 "quant",
@@ -444,13 +563,16 @@ def transfer_amount(tx):
         ValueError,
         TypeError
     ):
+
         return 0.0
 
     return raw / 1_000_000
 
 
 def transaction_timestamp(tx):
+
     try:
+
         return int(
             tx.get("block_ts")
             or tx.get("timestamp")
@@ -461,19 +583,12 @@ def transaction_timestamp(tx):
         ValueError,
         TypeError
     ):
+
         return 0
 
 
-def transaction_id(tx):
-    return (
-        tx.get("hash")
-        or tx.get("transaction_id")
-        or tx.get("txID")
-        or ""
-    )
-
-
 def get_tag_name(tx):
+
     tag = tx.get(
         "from_address_tag"
     )
@@ -482,6 +597,7 @@ def get_tag_name(tx):
         tag,
         dict
     ):
+
         return (
             tag.get(
                 "from_address_tag"
@@ -495,12 +611,14 @@ def get_tag_name(tx):
         tag,
         str
     ):
+
         return tag
 
     return ""
 
 
 def detect_cex(tag):
+
     normalized = str(
         tag or ""
     ).lower()
@@ -516,17 +634,20 @@ def detect_cex(tag):
 
 
 # ============================================================
-# PAIR DATABASE
+# DATABASE PAIRS
 # ============================================================
 
 def pair_is_excluded(pair_id):
+
     row = db.execute(
         """
         SELECT 1
         FROM excluded_pairs
         WHERE pair_id = ?
         """,
-        (pair_id,)
+        (
+            pair_id,
+        )
     ).fetchone()
 
     return row is not None
@@ -540,6 +661,7 @@ def save_pair(
     total_amount,
     cex_balance,
 ):
+
     now = utc_string()
 
     existing = db.execute(
@@ -617,7 +739,6 @@ def save_pair(
         pair_id = cursor.lastrowid
         is_new = True
 
-    # Monitor Wallet A
     db.execute(
         """
         INSERT INTO monitored_wallets(
@@ -637,7 +758,6 @@ def save_pair(
         )
     )
 
-    # Monitor Wallet B
     db.execute(
         """
         INSERT INTO monitored_wallets(
@@ -663,13 +783,14 @@ def save_pair(
 
 
 # ============================================================
-# NEW PAIR ALERT
+# PAIR ALERT
 # ============================================================
 
 def announce_pair(
     pair_id,
     pair
 ):
+
     status = (
         "✅"
         if pair["cex_balance"] >= 500
@@ -716,8 +837,12 @@ def announce_pair(
 # HISTORICAL SCANNER
 #
 # IMPORTANT:
-# This scans the global historical transfer endpoint ONCE.
-# It does NOT scan every receiver wallet separately.
+# We scan the global historical endpoint directly.
+# We do NOT scan every receiver wallet.
+#
+# Duplicate pages are tolerated temporarily.
+# This prevents a single overlapping TronScan page
+# from prematurely ending the entire historical scan.
 # ============================================================
 
 def historical_scan():
@@ -748,15 +873,7 @@ def historical_scan():
     )
 
     # --------------------------------------------------------
-    # pair_stats:
-    #
-    # {
-    #   (wallet_a, wallet_b): {
-    #       "count": 2,
-    #       "total": 1234.56,
-    #       "tags": set(...)
-    #   }
-    # }
+    # Pair statistics
     # --------------------------------------------------------
 
     pair_stats = defaultdict(
@@ -768,18 +885,42 @@ def historical_scan():
         }
     )
 
+    # Every transaction we've actually processed.
+    seen_global_txids = set()
+
     offset = 0
     page_size = 50
     processed = 0
 
-    # Used to detect a broken API pagination response.
-    seen_global_txids = set()
+    # Number of consecutive pages that contain no new IDs.
+    duplicate_pages = 0
+
+    # Hard safety limit.
+    # Prevents a broken API from running forever.
+    max_duplicate_pages = 5
+
+    # Hard page safety limit for one historical run.
+    max_pages = 500
+
+    page_number = 0
 
     while True:
 
+        page_number += 1
+
+        if page_number > max_pages:
+
+            log.warning(
+                "Historical scan reached safety limit "
+                "of %s pages.",
+                max_pages
+            )
+
+            break
+
         try:
 
-            transfers = get_usdt_transfers(
+            data = get_usdt_transfer_page(
                 start_timestamp=start_ms,
                 end_timestamp=end_ms,
                 start=offset,
@@ -796,8 +937,13 @@ def historical_scan():
             time.sleep(10)
             continue
 
+        transfers = data.get(
+            "token_transfers",
+            []
+        )
+
         # ----------------------------------------------------
-        # No more results.
+        # No results = genuine end.
         # ----------------------------------------------------
 
         if not transfers:
@@ -820,7 +966,7 @@ def historical_scan():
         new_transactions = 0
 
         # ----------------------------------------------------
-        # Process this global batch.
+        # Process transactions
         # ----------------------------------------------------
 
         for tx in transfers:
@@ -829,13 +975,12 @@ def historical_scan():
                 tx
             )
 
-            # If an ID exists and we have already seen it,
-            # don't process it twice.
+            # If the API supplied an ID and we already
+            # processed it, skip the duplicate.
+            if txid and txid in seen_global_txids:
+                continue
+
             if txid:
-
-                if txid in seen_global_txids:
-                    continue
-
                 seen_global_txids.add(
                     txid
                 )
@@ -850,18 +995,13 @@ def historical_scan():
                 "to_address"
             )
 
-            if not wallet_a:
-                continue
-
-            if not wallet_b:
+            if not wallet_a or not wallet_b:
                 continue
 
             amount = transfer_amount(
                 tx
             )
 
-            # Requirement:
-            # transfer must be MORE than $50.
             if amount <= MIN_TRANSFER_USD:
                 continue
 
@@ -869,7 +1009,6 @@ def historical_scan():
                 tx
             )
 
-            # Keep local timestamp protection.
             if timestamp:
 
                 if timestamp < start_ms:
@@ -887,7 +1026,8 @@ def historical_scan():
                 pair_key
             ]
 
-            # Unique transaction count.
+            # Protect the pair counter against
+            # duplicate transaction IDs.
             if txid:
 
                 if txid in stats["txids"]:
@@ -906,24 +1046,51 @@ def historical_scan():
             )
 
             if tag:
+
                 stats["tags"].add(
                     tag
                 )
 
         # ----------------------------------------------------
-        # Pagination protection.
+        # Duplicate page handling
         # ----------------------------------------------------
 
         if new_transactions == 0:
 
+            duplicate_pages += 1
+
             log.warning(
-                "Historical pagination stopped: "
-                "API returned a page with no new transactions."
+                "Historical page contained no new "
+                "transactions "
+                "(duplicate page %s/%s).",
+                duplicate_pages,
+                max_duplicate_pages
             )
 
-            break
+            # IMPORTANT:
+            #
+            # Do NOT stop immediately.
+            #
+            # Move forward and see if TronScan gives us
+            # another page.
+            #
+            # Only stop after several consecutive duplicate
+            # pages.
+            if duplicate_pages >= max_duplicate_pages:
 
-        processed += new_transactions
+                log.warning(
+                    "Historical pagination stopped after "
+                    "%s consecutive duplicate pages.",
+                    max_duplicate_pages
+                )
+
+                break
+
+        else:
+
+            duplicate_pages = 0
+
+            processed += new_transactions
 
         log.info(
             "Historical progress: "
@@ -934,9 +1101,7 @@ def historical_scan():
         )
 
         # ----------------------------------------------------
-        # Check whether we already have enough qualified pairs.
-        #
-        # This avoids downloading unnecessary additional pages.
+        # Qualification check
         # ----------------------------------------------------
 
         existing_count = db.execute(
@@ -946,38 +1111,22 @@ def historical_scan():
             """
         ).fetchone()["count"]
 
-        qualified_count = existing_count
-
-        if qualified_count < TARGET_PAIRS:
+        if existing_count < TARGET_PAIRS:
 
             for (
                 wallet_a,
                 wallet_b
-            ), stats in pair_stats.items():
+            ), stats in list(
+                pair_stats.items()
+            ):
+
+                if existing_count >= TARGET_PAIRS:
+                    break
 
                 if stats["count"] < 2:
                     continue
 
-                # Find a CEX tag among ALL transfers
-                # belonging to this pair.
-                cex_name = ""
-
-                for tag in stats["tags"]:
-
-                    is_cex, detected_name = detect_cex(
-                        tag
-                    )
-
-                    if is_cex:
-
-                        cex_name = detected_name
-                        break
-
-                if not cex_name:
-                    continue
-
-                # Don't repeatedly process a pair that is
-                # already in the database.
+                # Skip already saved pair.
                 existing_pair = db.execute(
                     """
                     SELECT id
@@ -994,8 +1143,39 @@ def historical_scan():
                 if existing_pair:
                     continue
 
-                # We only call the balance API for a pair
-                # that has already met the requirements.
+                # Search ALL retained tags for a CEX tag.
+                cex_name = ""
+
+                for tag in stats["tags"]:
+
+                    is_cex, detected_name = (
+                        detect_cex(tag)
+                    )
+
+                    if is_cex:
+
+                        cex_name = (
+                            detected_name
+                        )
+
+                        break
+
+                if not cex_name:
+                    continue
+
+                log.info(
+                    "Candidate pair qualifies: "
+                    "%s → %s | "
+                    "%sx | $%.2f | CEX=%s",
+                    wallet_a,
+                    wallet_b,
+                    stats["count"],
+                    stats["total"],
+                    cex_name
+                )
+
+                # Only call balance API after all
+                # qualification requirements are met.
                 balance = get_usdt_balance(
                     wallet_a
                 )
@@ -1004,9 +1184,12 @@ def historical_scan():
                     "wallet_a": wallet_a,
                     "wallet_b": wallet_b,
                     "cex_name": cex_name,
-                    "transfer_count": stats["count"],
-                    "total_amount": stats["total"],
-                    "cex_balance": balance,
+                    "transfer_count":
+                        stats["count"],
+                    "total_amount":
+                        stats["total"],
+                    "cex_balance":
+                        balance,
                 }
 
                 pair_id, is_new = save_pair(
@@ -1020,17 +1203,11 @@ def historical_scan():
 
                 if is_new:
 
-                    qualified_count += 1
+                    existing_count += 1
 
                     log.info(
-                        "Eligible pair found: #%s | "
-                        "%s → %s | "
-                        "%sx | $%.2f",
-                        pair_id,
-                        wallet_a,
-                        wallet_b,
-                        stats["count"],
-                        stats["total"],
+                        "✅ Eligible pair found: #%s",
+                        pair_id
                     )
 
                     announce_pair(
@@ -1038,7 +1215,7 @@ def historical_scan():
                         pair
                     )
 
-                if qualified_count >= TARGET_PAIRS:
+                if existing_count >= TARGET_PAIRS:
 
                     log.info(
                         "Target of %s eligible pairs reached.",
@@ -1048,18 +1225,21 @@ def historical_scan():
                     return
 
         # ----------------------------------------------------
-        # IMPORTANT:
+        # PAGINATION
+        # ----------------------------------------------------
         #
-        # A 50-record page does NOT mean the scan is finished.
-        # Continue to the next offset.
+        # Always move exactly one requested page forward.
+        #
+        # This is important. We do NOT use len(unique IDs)
+        # to calculate the next offset.
         # ----------------------------------------------------
 
-        offset += len(
-            transfers
-        )
+        offset += page_size
 
-        # If fewer than 50 came back, this is normally the
-        # final page.
+        # A short page is normally the end.
+        #
+        # However, if we previously encountered weird
+        # pagination behavior, continue only if needed.
         if len(transfers) < page_size:
 
             log.info(
@@ -1070,15 +1250,11 @@ def historical_scan():
 
             break
 
-        # Small delay to reduce API pressure.
-        time.sleep(0.2)
+        time.sleep(0.25)
 
-    # --------------------------------------------------------
-    # Final qualification pass.
-    #
-    # This catches pairs that only reached 2 transfers after
-    # later historical pages were processed.
-    # --------------------------------------------------------
+    # ========================================================
+    # FINAL QUALIFICATION PASS
+    # ========================================================
 
     log.info(
         "Historical pages finished. "
@@ -1103,7 +1279,6 @@ def historical_scan():
         if stats["count"] < 2:
             continue
 
-        # Skip existing pair.
         existing_pair = db.execute(
             """
             SELECT id
@@ -1124,8 +1299,8 @@ def historical_scan():
 
         for tag in stats["tags"]:
 
-            is_cex, detected_name = detect_cex(
-                tag
+            is_cex, detected_name = (
+                detect_cex(tag)
             )
 
             if is_cex:
@@ -1144,9 +1319,12 @@ def historical_scan():
             "wallet_a": wallet_a,
             "wallet_b": wallet_b,
             "cex_name": cex_name,
-            "transfer_count": stats["count"],
-            "total_amount": stats["total"],
-            "cex_balance": balance,
+            "transfer_count":
+                stats["count"],
+            "total_amount":
+                stats["total"],
+            "cex_balance":
+                balance,
         }
 
         pair_id, is_new = save_pair(
@@ -1163,7 +1341,7 @@ def historical_scan():
             existing_count += 1
 
             log.info(
-                "Eligible pair found in final pass: #%s",
+                "✅ Eligible pair found in final pass: #%s",
                 pair_id
             )
 
@@ -1186,6 +1364,7 @@ def historical_scan():
 # ============================================================
 
 def get_active_pairs():
+
     return db.execute(
         """
         SELECT *
@@ -1201,7 +1380,7 @@ def monitor_pair(pair):
     wallet_a = pair["wallet_a"]
     wallet_b = pair["wallet_b"]
 
-    last_checked = db.execute(
+    row = db.execute(
         """
         SELECT last_transaction_timestamp
         FROM monitored_wallets
@@ -1214,11 +1393,11 @@ def monitor_pair(pair):
 
     previous_timestamp = (
         int(
-            last_checked[
+            row[
                 "last_transaction_timestamp"
             ]
         )
-        if last_checked
+        if row
         else 0
     )
 
@@ -1263,9 +1442,10 @@ def monitor_pair(pair):
             if amount <= 0:
                 continue
 
-            txid = transaction_id(
-                tx
-            ) or "unknown"
+            txid = (
+                transaction_id(tx)
+                or "unknown"
+            )
 
             send_telegram(
                 f"🔔 <b>New A → B USDT Transaction</b>\n\n"
@@ -1730,7 +1910,9 @@ def poll_telegram():
             params={
                 "offset": offset,
                 "timeout": 5,
-                "allowed_updates": ["message"],
+                "allowed_updates": [
+                    "message"
+                ],
             },
             timeout=10,
             attempts=2,
@@ -1811,7 +1993,7 @@ def poll_telegram():
 
 
 # ============================================================
-# STARTUP
+# STARTUP MESSAGE
 # ============================================================
 
 def startup_message():
@@ -1836,7 +2018,7 @@ def startup_message():
 
 
 # ============================================================
-# MAIN LOOP
+# MAIN
 # ============================================================
 
 def main():
@@ -1868,7 +2050,7 @@ def main():
     startup_message()
 
     # --------------------------------------------------------
-    # Historical qualification
+    # Historical scan
     # --------------------------------------------------------
 
     try:
@@ -1896,12 +2078,10 @@ def main():
 
         current_time = time.time()
 
-        # Keep Telegram responsive.
         poll_telegram()
 
         if (
-            current_time
-            - last_monitor
+            current_time - last_monitor
             >= MONITOR_INTERVAL
         ):
 
