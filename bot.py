@@ -8,12 +8,14 @@ import requests
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
+
 # ============================================================
 # TRON WALLET MONITOR
 # Persistent historical qualification + ongoing monitoring
 # ============================================================
 
 print("🚀 Starting Persistent TRON Wallet Monitor...")
+
 
 # ============================================================
 # CONFIGURATION
@@ -55,6 +57,7 @@ CEX_KEYWORDS = [
     "poloniex",
 ]
 
+
 # ============================================================
 # LOGGING
 # ============================================================
@@ -66,6 +69,7 @@ logging.basicConfig(
 
 log = logging.getLogger("tron-monitor")
 
+
 # ============================================================
 # DATABASE
 # ============================================================
@@ -76,6 +80,7 @@ db = sqlite3.connect(
 )
 
 db.row_factory = sqlite3.Row
+
 
 db.execute("""
 CREATE TABLE IF NOT EXISTS pairs (
@@ -95,12 +100,14 @@ CREATE TABLE IF NOT EXISTS pairs (
 )
 """)
 
+
 db.execute("""
 CREATE TABLE IF NOT EXISTS excluded_pairs (
     pair_id INTEGER PRIMARY KEY,
     excluded_at TEXT NOT NULL
 )
 """)
+
 
 db.execute("""
 CREATE TABLE IF NOT EXISTS monitored_wallets (
@@ -113,12 +120,14 @@ CREATE TABLE IF NOT EXISTS monitored_wallets (
 )
 """)
 
+
 db.execute("""
 CREATE TABLE IF NOT EXISTS scan_state (
     key TEXT PRIMARY KEY,
     value TEXT
 )
 """)
+
 
 db.execute("""
 CREATE TABLE IF NOT EXISTS telegram_state (
@@ -127,7 +136,9 @@ CREATE TABLE IF NOT EXISTS telegram_state (
 )
 """)
 
+
 db.commit()
+
 
 # ============================================================
 # HELPERS
@@ -143,6 +154,15 @@ def utc_string():
 
 def telegram_escape(value):
     return html.escape(str(value or ""))
+
+
+def transaction_id(tx):
+    return (
+        tx.get("hash")
+        or tx.get("transaction_id")
+        or tx.get("txID")
+        or ""
+    )
 
 
 # ============================================================
@@ -183,7 +203,10 @@ def send_telegram(message):
         )
 
     except requests.RequestException as exc:
-        log.warning("Telegram request failed: %s", exc)
+        log.warning(
+            "Telegram request failed: %s",
+            exc
+        )
 
     return False
 
@@ -198,7 +221,7 @@ def get_telegram_offset():
 
     try:
         return int(row["value"])
-    except ValueError:
+    except (ValueError, TypeError):
         return 0
 
 
@@ -211,6 +234,7 @@ def set_telegram_offset(offset):
     """, (str(offset),))
 
     db.commit()
+
 
 # ============================================================
 # API HEADERS
@@ -234,6 +258,64 @@ def trongrid_headers():
     return {}
 
 
+# ============================================================
+# HTTP WITH RETRIES
+# ============================================================
+
+def http_get(
+    url,
+    params=None,
+    headers=None,
+    timeout=30,
+    attempts=3
+):
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                headers=headers or {},
+                timeout=timeout,
+            )
+
+            if response.status_code == 429:
+                wait = min(10 * attempt, 30)
+
+                log.warning(
+                    "Rate limited. Waiting %ss...",
+                    wait
+                )
+
+                time.sleep(wait)
+                continue
+
+            response.raise_for_status()
+
+            return response.json()
+
+        except (
+            requests.RequestException,
+            ValueError,
+        ) as exc:
+
+            last_error = exc
+
+            if attempt < attempts:
+                time.sleep(
+                    min(2 * attempt, 10)
+                )
+
+    raise RuntimeError(
+        f"API request failed after {attempts} attempts: {last_error}"
+    )
+
+
+# ============================================================
+# TRONSCAN USDT TRANSFERS
+# ============================================================
+
 def get_usdt_transfers(
     start_timestamp=None,
     end_timestamp=None,
@@ -253,51 +335,16 @@ def get_usdt_transfers(
     if end_timestamp is not None:
         params["end_timestamp"] = end_timestamp
 
-    return http_get(
+    data = http_get(
         f"{TRONSCAN_URL}/token_trc20/transfers",
         params=params,
         headers=tronscan_headers(),
         timeout=30,
-    ).get("token_transfers", [])
+    )
 
-
-# ============================================================
-# HTTP WITH RETRIES
-# ============================================================
-
-def http_get(url, params=None, headers=None, timeout=30, attempts=3):
-    last_error = None
-
-    for attempt in range(1, attempts + 1):
-        try:
-            response = requests.get(
-                url,
-                params=params,
-                headers=headers or {},
-                timeout=timeout,
-            )
-
-            if response.status_code == 429:
-                wait = min(10 * attempt, 30)
-                log.warning("Rate limited. Waiting %ss...", wait)
-                time.sleep(wait)
-                continue
-
-            response.raise_for_status()
-
-            return response.json()
-
-        except (
-            requests.RequestException,
-            ValueError,
-        ) as exc:
-            last_error = exc
-
-            if attempt < attempts:
-                time.sleep(min(2 * attempt, 10))
-
-    raise RuntimeError(
-        f"API request failed after {attempts} attempts: {last_error}"
+    return data.get(
+        "token_transfers",
+        []
     )
 
 
@@ -318,19 +365,29 @@ def get_usdt_balance(address):
         )
 
         for token in data.get("data", []):
+
             token_address = (
-                token.get("token_info", {}).get("address")
+                token.get("token_info", {})
+                .get("address")
             )
 
             if token_address == USDT_CONTRACT:
-                raw = int(token.get("balance", 0))
-                decimals = int(
-                    token.get("token_info", {}).get("decimals", 6)
+
+                raw = int(
+                    token.get("balance", 0)
                 )
 
-                return raw / (10 ** decimals)
+                decimals = int(
+                    token.get("token_info", {})
+                    .get("decimals", 6)
+                )
+
+                return raw / (
+                    10 ** decimals
+                )
 
     except Exception as exc:
+
         log.warning(
             "Could not obtain USDT balance for %s: %s",
             address,
@@ -340,8 +397,13 @@ def get_usdt_balance(address):
     return 0.0
 
 
-def get_wallet_history(address, limit=50, start=0):
+def get_wallet_history(
+    address,
+    limit=50,
+    start=0
+):
     try:
+
         data = http_get(
             f"{TRONSCAN_URL}/token_trc20/transfers",
             params={
@@ -354,9 +416,20 @@ def get_wallet_history(address, limit=50, start=0):
             headers=tronscan_headers(),
             timeout=30,
         )
-        return data.get("token_transfers", [])
+
+        return data.get(
+            "token_transfers",
+            []
+        )
+
     except Exception as exc:
-        log.warning("History lookup failed for %s: %s", address, exc)
+
+        log.warning(
+            "History lookup failed for %s: %s",
+            address,
+            exc
+        )
+
         return []
 
 
@@ -366,25 +439,41 @@ def get_wallet_history(address, limit=50, start=0):
 
 def transfer_amount(tx):
     try:
-        raw = int(tx.get("quant", 0))
-    except (ValueError, TypeError):
+        raw = int(
+            tx.get("quant", 0)
+        )
+
+    except (
+        ValueError,
+        TypeError
+    ):
         return 0.0
 
     return raw / 1_000_000
 
 
 def transaction_timestamp(tx):
-    return int(
-        tx.get("block_ts")
-        or tx.get("timestamp")
-        or 0
-    )
+    try:
+        return int(
+            tx.get("block_ts")
+            or tx.get("timestamp")
+            or 0
+        )
+
+    except (
+        ValueError,
+        TypeError
+    ):
+        return 0
 
 
 def get_tag_name(tx):
-    tag = tx.get("from_address_tag")
+    tag = tx.get(
+        "from_address_tag"
+    )
 
     if isinstance(tag, dict):
+
         return (
             tag.get("from_address_tag")
             or tag.get("name")
@@ -399,9 +488,12 @@ def get_tag_name(tx):
 
 
 def detect_cex(tag):
-    normalized = tag.lower()
+    normalized = (
+        tag or ""
+    ).lower()
 
     for keyword in CEX_KEYWORDS:
+
         if keyword in normalized:
             return True, tag
 
@@ -414,7 +506,11 @@ def detect_cex(tag):
 
 def pair_is_excluded(pair_id):
     row = db.execute(
-        "SELECT 1 FROM excluded_pairs WHERE pair_id = ?",
+        """
+        SELECT 1
+        FROM excluded_pairs
+        WHERE pair_id = ?
+        """,
         (pair_id,)
     ).fetchone()
 
@@ -431,15 +527,23 @@ def save_pair(
 ):
     now = utc_string()
 
-    existing = db.execute("""
+    existing = db.execute(
+        """
         SELECT *
         FROM pairs
         WHERE wallet_a = ?
           AND wallet_b = ?
-    """, (wallet_a, wallet_b)).fetchone()
+        """,
+        (
+            wallet_a,
+            wallet_b
+        )
+    ).fetchone()
 
     if existing:
-        db.execute("""
+
+        db.execute(
+            """
             UPDATE pairs
             SET transfer_count = ?,
                 total_amount = ?,
@@ -447,20 +551,24 @@ def save_pair(
                 cex_name = ?,
                 last_seen = ?
             WHERE id = ?
-        """, (
-            transfer_count,
-            total_amount,
-            cex_balance,
-            cex_name,
-            now,
-            existing["id"],
-        ))
+            """,
+            (
+                transfer_count,
+                total_amount,
+                cex_balance,
+                cex_name,
+                now,
+                existing["id"],
+            )
+        )
 
         pair_id = existing["id"]
         is_new = False
 
     else:
-        cursor = db.execute("""
+
+        cursor = db.execute(
+            """
             INSERT INTO pairs (
                 wallet_a,
                 wallet_b,
@@ -474,23 +582,30 @@ def save_pair(
                 active,
                 alerted
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0)
-        """, (
-            wallet_a,
-            wallet_b,
-            cex_name,
-            transfer_count,
-            total_amount,
-            cex_balance,
-            now,
-            now,
-            now,
-        ))
+            VALUES (
+                ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, 1, 0
+            )
+            """,
+            (
+                wallet_a,
+                wallet_b,
+                cex_name,
+                transfer_count,
+                total_amount,
+                cex_balance,
+                now,
+                now,
+                now,
+            )
+        )
 
         pair_id = cursor.lastrowid
         is_new = True
 
-    db.execute("""
+    # Monitor Wallet A
+    db.execute(
+        """
         INSERT INTO monitored_wallets(
             address,
             wallet_type,
@@ -498,10 +613,20 @@ def save_pair(
             first_seen
         )
         VALUES (?, 'A', ?, ?)
-        ON CONFLICT(address) DO NOTHING
-    """, (wallet_a, pair_id, now))
 
-    db.execute("""
+        ON CONFLICT(address)
+        DO NOTHING
+        """,
+        (
+            wallet_a,
+            pair_id,
+            now
+        )
+    )
+
+    # Monitor Wallet B
+    db.execute(
+        """
         INSERT INTO monitored_wallets(
             address,
             wallet_type,
@@ -509,8 +634,16 @@ def save_pair(
             first_seen
         )
         VALUES (?, 'B', ?, ?)
-        ON CONFLICT(address) DO NOTHING
-    """, (wallet_b, pair_id, now))
+
+        ON CONFLICT(address)
+        DO NOTHING
+        """,
+        (
+            wallet_b,
+            pair_id,
+            now
+        )
+    )
 
     db.commit()
 
@@ -520,18 +653,25 @@ def save_pair(
 # ============================================================
 # PAIR QUALIFICATION
 # ============================================================
-def analyze_wallet(wallet_b, start_ms, end_ms):
+
+def analyze_wallet(
+    wallet_b,
+    start_ms,
+    end_ms
+):
     by_sender = defaultdict(list)
 
     offset = 0
     page_size = 50
+
     seen_txids = set()
 
     while True:
+
         history = get_wallet_history(
             wallet_b,
             limit=page_size,
-            start=offset,
+            start=offset
         )
 
         if not history:
@@ -541,21 +681,18 @@ def analyze_wallet(wallet_b, start_ms, end_ms):
             "Wallet %s analysis batch: %s transfers (offset %s)",
             wallet_b,
             len(history),
-            offset,
+            offset
         )
 
         new_transactions = 0
         oldest_timestamp = None
 
         for tx in history:
-            txid = (
-                tx.get("hash")
-                or tx.get("transaction_id")
-                or tx.get("txID")
-                or ""
-            )
 
-            # Prevent an API pagination failure from creating an infinite loop.
+            txid = transaction_id(tx)
+
+            # Prevent infinite pagination if API
+            # repeats the same page.
             if txid and txid in seen_txids:
                 continue
 
@@ -567,49 +704,66 @@ def analyze_wallet(wallet_b, start_ms, end_ms):
             if tx.get("to_address") != wallet_b:
                 continue
 
-            from_address = tx.get("from_address")
+            from_address = tx.get(
+                "from_address"
+            )
+
             if not from_address:
                 continue
 
             amount = transfer_amount(tx)
+
             if amount <= MIN_TRANSFER_USD:
                 continue
 
             timestamp = transaction_timestamp(tx)
 
             if timestamp:
-                if oldest_timestamp is None:
-                    oldest_timestamp = timestamp
-                else:
-                    oldest_timestamp = min(oldest_timestamp, timestamp)
 
-                if timestamp < start_ms or timestamp > end_ms:
+                if (
+                    oldest_timestamp is None
+                    or timestamp < oldest_timestamp
+                ):
+                    oldest_timestamp = timestamp
+
+                if timestamp < start_ms:
                     continue
 
-            by_sender[from_address].append({
-                "amount": amount,
-                "timestamp": timestamp,
-                "tag": get_tag_name(tx),
-                "txid": txid,
-            })
+                if timestamp > end_ms:
+                    continue
 
-        # If the API gives us the same page again, stop safely.
-        if new_transactions == 0:
-            log.warning(
-                "Wallet %s pagination stopped: no new transactions.",
-                wallet_b,
+            by_sender[from_address].append(
+                {
+                    "amount": amount,
+                    "timestamp": timestamp,
+                    "tag": get_tag_name(tx),
+                    "txid": txid,
+                }
             )
+
+        # API returned a repeated page.
+        if new_transactions == 0:
+
+            log.warning(
+                "Wallet %s pagination stopped: "
+                "no new transactions.",
+                wallet_b
+            )
+
             break
 
-        # We are sorted newest → oldest. Once the oldest transaction
-        # reaches the beginning of our requested period, we're done.
-        if oldest_timestamp is not None and oldest_timestamp <= start_ms:
+        # Because results are newest -> oldest,
+        # reaching the start of the requested period
+        # means we have enough history.
+        if (
+            oldest_timestamp is not None
+            and oldest_timestamp <= start_ms
+        ):
             break
 
         offset += len(history)
 
-        # TronScan is returning 50 per page in this setup.
-        # A smaller page means there is probably nothing else to fetch.
+        # A short page means there are no more records.
         if len(history) < page_size:
             break
 
@@ -618,52 +772,94 @@ def analyze_wallet(wallet_b, start_ms, end_ms):
     qualified = []
 
     for wallet_a, transactions in by_sender.items():
+
+        # Same Wallet A -> Wallet B must occur at least twice.
         if len(transactions) < 2:
             continue
 
-        tags = [tx["tag"] for tx in transactions if tx["tag"]]
-        tag_name = tags[0] if tags else ""
+        tags = [
+            tx["tag"]
+            for tx in transactions
+            if tx["tag"]
+        ]
 
-        is_cex, cex_name = detect_cex(tag_name)
+        tag_name = (
+            tags[0]
+            if tags
+            else ""
+        )
+
+        is_cex, cex_name = detect_cex(
+            tag_name
+        )
+
+        # Wallet A must be CEX-related.
         if not is_cex:
             continue
 
-        total = sum(tx["amount"] for tx in transactions)
-        balance = get_usdt_balance(wallet_a)
+        total = sum(
+            tx["amount"]
+            for tx in transactions
+        )
 
-        qualified.append({
-            "wallet_a": wallet_a,
-            "wallet_b": wallet_b,
-            "cex_name": cex_name,
-            "transfer_count": len(transactions),
-            "total_amount": total,
-            "cex_balance": balance,
-        })
+        balance = get_usdt_balance(
+            wallet_a
+        )
+
+        qualified.append(
+            {
+                "wallet_a": wallet_a,
+                "wallet_b": wallet_b,
+                "cex_name": cex_name,
+                "transfer_count": len(transactions),
+                "total_amount": total,
+                "cex_balance": balance,
+            }
+        )
 
     return qualified
+
+
 # ============================================================
 # NEW PAIR ALERT
 # ============================================================
 
 def announce_pair(pair_id, pair):
-    status = "✅" if pair["cex_balance"] >= 500 else "⚠️"
+
+    status = (
+        "✅"
+        if pair["cex_balance"] >= 500
+        else "⚠️"
+    )
 
     message = (
         f"{status} <b>Eligible Pair #{pair_id}</b>\n\n"
+
         f"🏦 <b>CEX / Wallet A:</b>\n"
-        f"<code>{telegram_escape(pair['wallet_a'])}</code>\n\n"
+        f"<code>"
+        f"{telegram_escape(pair['wallet_a'])}"
+        f"</code>\n\n"
+
         f"🏷 <b>CEX Tag:</b> "
         f"{telegram_escape(pair['cex_name'])}\n"
+
         f"💰 <b>USDT Balance:</b> "
         f"${pair['cex_balance']:,.2f}\n\n"
+
         f"👤 <b>Wallet B:</b>\n"
-        f"<code>{telegram_escape(pair['wallet_b'])}</code>\n\n"
+        f"<code>"
+        f"{telegram_escape(pair['wallet_b'])}"
+        f"</code>\n\n"
+
         f"📊 <b>Transfers:</b> "
         f"{pair['transfer_count']}x\n"
+
         f"💵 <b>Total Volume:</b> "
         f"${pair['total_amount']:,.2f}\n\n"
+
         f"Historical qualification window: "
         f"{WEEKS_BACK} week(s).\n"
+
         f"Monitoring will continue after qualification."
     )
 
@@ -673,12 +869,23 @@ def announce_pair(pair_id, pair):
 # ============================================================
 # HISTORICAL SCANNER
 # ============================================================
-def historical_scan():
-    end_date = utc_now()
-    start_date = end_date - timedelta(weeks=WEEKS_BACK)
 
-    start_ms = int(start_date.timestamp() * 1000)
-    end_ms = int(end_date.timestamp() * 1000)
+def historical_scan():
+
+    end_date = utc_now()
+
+    start_date = (
+        end_date
+        - timedelta(weeks=WEEKS_BACK)
+    )
+
+    start_ms = int(
+        start_date.timestamp() * 1000
+    )
+
+    end_ms = int(
+        end_date.timestamp() * 1000
+    )
 
     log.info(
         "Historical scan: %s → %s",
@@ -689,58 +896,108 @@ def historical_scan():
     offset = 0
     processed = 0
 
+    page_size = 50
+
+    seen_txids = set()
+
     while True:
 
         try:
+
             transfers = get_usdt_transfers(
                 start_timestamp=start_ms,
                 end_timestamp=end_ms,
                 start=offset,
-                limit=50,
+                limit=page_size,
             )
 
         except Exception as exc:
+
             log.error(
                 "Historical scan request failed: %s",
                 exc
             )
+
             time.sleep(10)
             continue
 
         if not transfers:
+
             log.info(
-                "No more historical transfers returned at offset %s.",
+                "No more historical transfers returned "
+                "at offset %s.",
                 offset
             )
+
             break
 
         log.info(
-            "Historical batch: %s transfers",
-            len(transfers)
+            "Historical batch: %s transfers (offset %s)",
+            len(transfers),
+            offset
         )
+
+        # Detect whether the API is returning
+        # the same page repeatedly.
+        new_transfers = []
+
+        for tx in transfers:
+
+            txid = transaction_id(tx)
+
+            if txid and txid in seen_txids:
+                continue
+
+            if txid:
+                seen_txids.add(txid)
+
+            new_transfers.append(tx)
+
+        if not new_transfers:
+
+            log.warning(
+                "Historical pagination stopped: "
+                "API returned no new transactions."
+            )
+
+            break
 
         receivers = set()
 
-        for tx in transfers:
-            receiver = tx.get("to_address")
+        for tx in new_transfers:
+
+            receiver = tx.get(
+                "to_address"
+            )
 
             if receiver:
                 receivers.add(receiver)
 
+        log.info(
+            "Historical batch contains %s receiver wallets.",
+            len(receivers)
+        )
+
         for wallet_b in receivers:
 
             current_count = db.execute(
-                "SELECT COUNT(*) AS count FROM pairs"
+                """
+                SELECT COUNT(*) AS count
+                FROM pairs
+                """
             ).fetchone()["count"]
 
             if current_count >= TARGET_PAIRS:
+
                 log.info(
                     "Target of %s eligible pairs reached.",
                     TARGET_PAIRS
                 )
+
                 return
 
             try:
+
                 results = analyze_wallet(
                     wallet_b,
                     start_ms,
@@ -759,6 +1016,7 @@ def historical_scan():
                     )
 
                     if is_new:
+
                         log.info(
                             "Eligible pair found: #%s",
                             pair_id
@@ -769,7 +1027,19 @@ def historical_scan():
                             pair
                         )
 
+                        current_count += 1
+
+                        if current_count >= TARGET_PAIRS:
+
+                            log.info(
+                                "Target of %s eligible pairs reached.",
+                                TARGET_PAIRS
+                            )
+
+                            return
+
             except Exception as exc:
+
                 log.warning(
                     "Could not analyze %s: %s",
                     wallet_b,
@@ -778,20 +1048,30 @@ def historical_scan():
 
             time.sleep(0.2)
 
-        processed += len(transfers)
+        processed += len(new_transfers)
+
         offset += len(transfers)
 
         log.info(
-            "Historical progress: %s transfers",
+            "Historical progress: %s transfers processed.",
             processed
         )
 
-        # Only stop when the API actually returns no records.
-        # A 50-transfer response is NOT treated as the end.
-        time.sleep(0.2)
+        # If fewer than 50 came back, this is
+        # the final page.
+        if len(transfers) < page_size:
+
+            log.info(
+                "Historical final page reached."
+            )
+
+            break
+
+        time.sleep(0.5)
 
     log.info(
-        "Historical scan completed. Total transfers processed: %s",
+        "Historical scan completed. "
+        "Total transfers processed: %s",
         processed
     )
 
@@ -801,31 +1081,43 @@ def historical_scan():
 # ============================================================
 
 def get_active_pairs():
-    return db.execute("""
+
+    return db.execute(
+        """
         SELECT *
         FROM pairs
         WHERE active = 1
         ORDER BY id
-    """).fetchall()
+        """
+    ).fetchall()
 
 
 def monitor_pair(pair):
+
     wallet_a = pair["wallet_a"]
     wallet_b = pair["wallet_b"]
 
-    last_checked = db.execute("""
+    last_checked = db.execute(
+        """
         SELECT last_transaction_timestamp
         FROM monitored_wallets
         WHERE address = ?
-    """, (wallet_b,)).fetchone()
+        """,
+        (wallet_b,)
+    ).fetchone()
 
     previous_timestamp = (
-        int(last_checked["last_transaction_timestamp"])
+        int(
+            last_checked[
+                "last_transaction_timestamp"
+            ]
+        )
         if last_checked
         else 0
     )
 
     try:
+
         history = get_wallet_history(
             wallet_b,
             limit=50
@@ -835,7 +1127,9 @@ def monitor_pair(pair):
 
         for tx in history:
 
-            timestamp = transaction_timestamp(tx)
+            timestamp = transaction_timestamp(
+                tx
+            )
 
             if timestamp > newest_timestamp:
                 newest_timestamp = timestamp
@@ -855,37 +1149,52 @@ def monitor_pair(pair):
                 continue
 
             txid = (
-                tx.get("hash")
-                or tx.get("transaction_id")
-                or tx.get("txID")
+                transaction_id(tx)
                 or "unknown"
             )
 
             send_telegram(
                 f"🔔 <b>New A → B USDT Transaction</b>\n\n"
+
                 f"<b>Pair:</b> #{pair['id']}\n"
+
                 f"<b>Wallet A:</b>\n"
-                f"<code>{telegram_escape(wallet_a)}</code>\n\n"
+                f"<code>"
+                f"{telegram_escape(wallet_a)}"
+                f"</code>\n\n"
+
                 f"<b>Wallet B:</b>\n"
-                f"<code>{telegram_escape(wallet_b)}</code>\n\n"
-                f"<b>Amount:</b> ${amount:,.2f}\n"
-                f"<b>TX:</b> <code>{telegram_escape(txid)}</code>"
+                f"<code>"
+                f"{telegram_escape(wallet_b)}"
+                f"</code>\n\n"
+
+                f"<b>Amount:</b> "
+                f"${amount:,.2f}\n"
+
+                f"<b>TX:</b> "
+                f"<code>"
+                f"{telegram_escape(txid)}"
+                f"</code>"
             )
 
-        db.execute("""
+        db.execute(
+            """
             UPDATE monitored_wallets
             SET last_checked = ?,
                 last_transaction_timestamp = ?
             WHERE address = ?
-        """, (
-            utc_string(),
-            newest_timestamp,
-            wallet_b,
-        ))
+            """,
+            (
+                utc_string(),
+                newest_timestamp,
+                wallet_b,
+            )
+        )
 
         db.commit()
 
     except Exception as exc:
+
         log.warning(
             "Monitoring failed for pair #%s: %s",
             pair["id"],
@@ -894,10 +1203,14 @@ def monitor_pair(pair):
 
 
 def monitor_wallets():
+
     pairs = get_active_pairs()
 
     for pair in pairs:
-        if pair_is_excluded(pair["id"]):
+
+        if pair_is_excluded(
+            pair["id"]
+        ):
             continue
 
         monitor_pair(pair)
@@ -908,35 +1221,65 @@ def monitor_wallets():
 # ============================================================
 
 def format_pair(pair):
-    excluded = pair_is_excluded(pair["id"])
-    status = "🚫 EXCLUDED" if excluded else "✅ ACTIVE"
+
+    excluded = pair_is_excluded(
+        pair["id"]
+    )
+
+    status = (
+        "🚫 EXCLUDED"
+        if excluded
+        else "✅ ACTIVE"
+    )
 
     return (
         f"<b>#{pair['id']} — {status}</b>\n"
-        f"CEX: {telegram_escape(pair['cex_name'])}\n"
+
+        f"CEX: "
+        f"{telegram_escape(pair['cex_name'])}\n"
+
         f"Wallet A:\n"
-        f"<code>{telegram_escape(pair['wallet_a'])}</code>\n"
-        f"Wallet A USDT: ${pair['cex_balance']:,.2f}\n\n"
+        f"<code>"
+        f"{telegram_escape(pair['wallet_a'])}"
+        f"</code>\n"
+
+        f"Wallet A USDT: "
+        f"${pair['cex_balance']:,.2f}\n\n"
+
         f"Wallet B:\n"
-        f"<code>{telegram_escape(pair['wallet_b'])}</code>\n\n"
-        f"Transfers: {pair['transfer_count']}x\n"
-        f"Volume: ${pair['total_amount']:,.2f}\n"
+        f"<code>"
+        f"{telegram_escape(pair['wallet_b'])}"
+        f"</code>\n\n"
+
+        f"Transfers: "
+        f"{pair['transfer_count']}x\n"
+
+        f"Volume: "
+        f"${pair['total_amount']:,.2f}\n"
     )
 
 
 def command_info():
-    pairs = db.execute("""
+
+    pairs = db.execute(
+        """
         SELECT *
         FROM pairs
         ORDER BY id
-    """).fetchall()
+        """
+    ).fetchall()
 
     if not pairs:
-        send_telegram("No eligible pairs have been discovered yet.")
+
+        send_telegram(
+            "No eligible pairs have been discovered yet."
+        )
+
         return
 
     active = [
-        p for p in pairs
+        p
+        for p in pairs
         if not pair_is_excluded(p["id"])
     ]
 
@@ -946,45 +1289,66 @@ def command_info():
     )
 
     for pair in pairs:
-        message += format_pair(pair) + "\n"
+
+        message += (
+            format_pair(pair)
+            + "\n"
+        )
 
     send_telegram(message)
 
 
 def command_exclude(parts):
+
     if len(parts) < 2:
+
         send_telegram(
             "Usage: <code>exclude 1</code>"
         )
+
         return
 
     try:
         pair_id = int(parts[1])
+
     except ValueError:
-        send_telegram("Pair number must be a number.")
+
+        send_telegram(
+            "Pair number must be a number."
+        )
+
         return
 
     pair = db.execute(
-        "SELECT id FROM pairs WHERE id = ?",
+        """
+        SELECT id
+        FROM pairs
+        WHERE id = ?
+        """,
         (pair_id,)
     ).fetchone()
 
     if not pair:
+
         send_telegram(
             f"Pair #{pair_id} was not found."
         )
+
         return
 
-    db.execute("""
+    db.execute(
+        """
         INSERT OR REPLACE INTO excluded_pairs(
             pair_id,
             excluded_at
         )
         VALUES (?, ?)
-    """, (
-        pair_id,
-        utc_string()
-    ))
+        """,
+        (
+            pair_id,
+            utc_string()
+        )
+    )
 
     db.commit()
 
@@ -994,10 +1358,13 @@ def command_exclude(parts):
 
 
 def command_history(parts):
+
     if len(parts) < 2:
+
         send_telegram(
             "Usage: <code>history WALLET_ADDRESS</code>"
         )
+
         return
 
     address = parts[1].strip()
@@ -1008,17 +1375,25 @@ def command_history(parts):
     )
 
     if not txs:
+
         send_telegram(
             "No USDT transactions were found."
         )
+
         return
 
     message = (
         f"🔍 <b>Last 10 USDT Transactions</b>\n"
-        f"<code>{telegram_escape(address)}</code>\n\n"
+        f"<code>"
+        f"{telegram_escape(address)}"
+        f"</code>\n\n"
     )
 
-    for index, tx in enumerate(txs[:10], 1):
+    for index, tx in enumerate(
+        txs[:10],
+        1
+    ):
+
         amount = transfer_amount(tx)
 
         from_address = tx.get(
@@ -1031,31 +1406,48 @@ def command_history(parts):
             "Unknown"
         )
 
-        timestamp = transaction_timestamp(tx)
+        timestamp = transaction_timestamp(
+            tx
+        )
 
         if timestamp:
+
             date = datetime.fromtimestamp(
                 timestamp / 1000,
                 timezone.utc
-            ).strftime("%Y-%m-%d %H:%M UTC")
+            ).strftime(
+                "%Y-%m-%d %H:%M UTC"
+            )
+
         else:
+
             date = "Unknown"
 
         message += (
             f"<b>#{index}</b> {date}\n"
             f"💰 ${amount:,.2f}\n"
-            f"From: <code>{telegram_escape(from_address)}</code>\n"
-            f"To: <code>{telegram_escape(to_address)}</code>\n\n"
+            f"From: "
+            f"<code>"
+            f"{telegram_escape(from_address)}"
+            f"</code>\n"
+            f"To: "
+            f"<code>"
+            f"{telegram_escape(to_address)}"
+            f"</code>\n\n"
         )
 
     send_telegram(message)
 
 
 def command_cost():
-    active = len([
-        p for p in get_active_pairs()
-        if not pair_is_excluded(p["id"])
-    ])
+
+    active = len(
+        [
+            p
+            for p in get_active_pairs()
+            if not pair_is_excluded(p["id"])
+        ]
+    )
 
     estimated_trx = active * 2.2
 
@@ -1069,61 +1461,101 @@ def command_cost():
 
 
 def command_status():
+
     pairs = db.execute(
-        "SELECT COUNT(*) AS count FROM pairs"
+        """
+        SELECT COUNT(*) AS count
+        FROM pairs
+        """
     ).fetchone()["count"]
 
     wallets = db.execute(
-        "SELECT COUNT(*) AS count FROM monitored_wallets"
+        """
+        SELECT COUNT(*) AS count
+        FROM monitored_wallets
+        """
     ).fetchone()["count"]
 
     excluded = db.execute(
-        "SELECT COUNT(*) AS count FROM excluded_pairs"
+        """
+        SELECT COUNT(*) AS count
+        FROM excluded_pairs
+        """
     ).fetchone()["count"]
 
     send_telegram(
         f"🤖 <b>Monitor Status</b>\n\n"
+
         f"Eligible pairs: {pairs}\n"
         f"Monitored wallets: {wallets}\n"
         f"Excluded pairs: {excluded}\n"
-        f"Lookback: {WEEKS_BACK} week(s)\n"
-        f"Minimum transfer: ${MIN_TRANSFER_USD:,.2f}\n"
-        f"Target pairs: {TARGET_PAIRS}"
+
+        f"Lookback: "
+        f"{WEEKS_BACK} week(s)\n"
+
+        f"Minimum transfer: "
+        f"${MIN_TRANSFER_USD:,.2f}\n"
+
+        f"Target pairs: "
+        f"{TARGET_PAIRS}"
     )
 
 
 def handle_command(text):
+
     parts = text.strip().split()
 
     if not parts:
         return
 
-    command = parts[0].lower().lstrip("/")
+    command = (
+        parts[0]
+        .lower()
+        .lstrip("/")
+    )
 
     if command == "info":
+
         command_info()
 
     elif command == "exclude":
+
         command_exclude(parts)
 
     elif command == "history":
+
         command_history(parts)
 
     elif command == "cost":
+
         command_cost()
 
     elif command == "status":
+
         command_status()
 
     elif command == "help":
+
         send_telegram(
             "<b>Available commands</b>\n\n"
-            "<code>info</code> — Show discovered pairs\n"
-            "<code>exclude 1</code> — Exclude a pair\n"
-            "<code>history WALLET</code> — Show recent USDT history\n"
-            "<code>cost</code> — Informational cost estimate\n"
-            "<code>status</code> — Monitor status\n"
-            "<code>help</code> — Show commands"
+
+            "<code>info</code> — "
+            "Show discovered pairs\n"
+
+            "<code>exclude 1</code> — "
+            "Exclude a pair\n"
+
+            "<code>history WALLET</code> — "
+            "Show recent USDT history\n"
+
+            "<code>cost</code> — "
+            "Informational cost estimate\n"
+
+            "<code>status</code> — "
+            "Monitor status\n"
+
+            "<code>help</code> — "
+            "Show commands"
         )
 
 
@@ -1132,12 +1564,14 @@ def handle_command(text):
 # ============================================================
 
 def poll_telegram():
+
     if not TELEGRAM_URL or not CHAT_ID:
         return
 
     offset = get_telegram_offset()
 
     try:
+
         data = http_get(
             f"{TELEGRAM_URL}/getUpdates",
             params={
@@ -1150,47 +1584,75 @@ def poll_telegram():
         )
 
     except Exception as exc:
+
         log.warning(
             "Telegram polling failed: %s",
             exc
         )
+
         return
 
-    updates = data.get("result", [])
+    updates = data.get(
+        "result",
+        []
+    )
 
     for update in updates:
-        update_id = update.get("update_id")
+
+        update_id = update.get(
+            "update_id"
+        )
 
         if update_id is not None:
+
             set_telegram_offset(
                 int(update_id) + 1
             )
 
-        message = update.get("message")
+        message = update.get(
+            "message"
+        )
 
         if not message:
             continue
 
         chat_id = str(
-            message.get("chat", {}).get("id", "")
+            message.get(
+                "chat",
+                {}
+            ).get(
+                "id",
+                ""
+            )
         )
 
         if chat_id != str(CHAT_ID):
             continue
 
-        text = message.get("text", "").strip()
+        text = (
+            message.get(
+                "text",
+                ""
+            )
+            .strip()
+        )
 
         if text:
+
             try:
+
                 handle_command(text)
+
             except Exception as exc:
+
                 log.exception(
                     "Command failed: %s",
                     exc
                 )
 
                 send_telegram(
-                    "❌ An error occurred while processing that command."
+                    "❌ An error occurred while "
+                    "processing that command."
                 )
 
 
@@ -1199,13 +1661,23 @@ def poll_telegram():
 # ============================================================
 
 def startup_message():
+
     send_telegram(
         "🚀 <b>TRON Wallet Monitor Started</b>\n\n"
-        f"Historical lookback: {WEEKS_BACK} week(s)\n"
-        f"Minimum transfer: ${MIN_TRANSFER_USD:,.2f}\n"
+
+        f"Historical lookback: "
+        f"{WEEKS_BACK} week(s)\n"
+
+        f"Minimum transfer: "
+        f"${MIN_TRANSFER_USD:,.2f}\n"
+
         f"Required transfers: 2+\n"
-        f"Target pairs: {TARGET_PAIRS}\n\n"
-        "Historical qualification and ongoing monitoring are active."
+
+        f"Target pairs: "
+        f"{TARGET_PAIRS}\n\n"
+
+        "Historical qualification and ongoing "
+        "monitoring are active."
     )
 
 
@@ -1216,37 +1688,50 @@ def startup_message():
 def main():
 
     if not TRONSCAN_API_KEY:
+
         log.warning(
             "TRONSCAN_API_KEY is not configured."
         )
 
     if not TRONGRID_API_KEY:
+
         log.warning(
             "TRONGRID_API_KEY is not configured."
         )
 
     if not TELEGRAM_BOT_TOKEN:
+
         log.warning(
             "TELEGRAM_BOT_TOKEN is not configured."
         )
 
     if not CHAT_ID:
+
         log.warning(
             "CHAT_ID is not configured."
         )
 
     startup_message()
 
-    # Historical qualification
+    # ========================================================
+    # HISTORICAL QUALIFICATION
+    # ========================================================
+
     try:
+
         historical_scan()
+
     except Exception as exc:
+
         log.exception(
             "Historical scan crashed: %s",
             exc
         )
 
-    # Continuous monitoring
+    # ========================================================
+    # CONTINUOUS MONITORING
+    # ========================================================
+
     last_monitor = 0
 
     log.info(
@@ -1254,18 +1739,23 @@ def main():
     )
 
     while True:
+
         current_time = time.time()
 
-        # Keep Telegram responsive
+        # Keep Telegram responsive.
         poll_telegram()
 
         if (
             current_time - last_monitor
             >= MONITOR_INTERVAL
         ):
+
             try:
+
                 monitor_wallets()
+
             except Exception as exc:
+
                 log.exception(
                     "Monitoring cycle failed: %s",
                     exc
@@ -1281,19 +1771,24 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+
     try:
+
         main()
 
     except KeyboardInterrupt:
+
         log.info(
             "Monitor stopped by user."
         )
 
     except Exception as exc:
+
         log.exception(
             "Fatal error: %s",
             exc
         )
 
     finally:
+
         db.close()
