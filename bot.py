@@ -314,58 +314,24 @@ def get_usdt_balance(address):
     return 0.0
 
 
-def get_wallet_history(address, limit=10):
+def get_wallet_history(address, limit=50, start=0):
     try:
         data = http_get(
             f"{TRONSCAN_URL}/token_trc20/transfers",
             params={
                 "address": address,
                 "limit": limit,
-                "start": 0,
+                "start": start,
                 "sort": "-timestamp",
                 "contract_address": USDT_CONTRACT,
             },
             headers=tronscan_headers(),
             timeout=30,
         )
-
         return data.get("token_transfers", [])
-
     except Exception as exc:
-        log.warning(
-            "History lookup failed for %s: %s",
-            address,
-            exc
-        )
-
+        log.warning("History lookup failed for %s: %s", address, exc)
         return []
-
-
-def get_usdt_transfers(
-    start_timestamp=None,
-    end_timestamp=None,
-    start=0,
-    limit=100,
-):
-    params = {
-        "start": start,
-        "limit": limit,
-        "contract_address": USDT_CONTRACT,
-        "sort": "-timestamp",
-    }
-
-    if start_timestamp is not None:
-        params["start_timestamp"] = start_timestamp
-
-    if end_timestamp is not None:
-        params["end_timestamp"] = end_timestamp
-
-    return http_get(
-        f"{TRONSCAN_URL}/token_trc20/transfers",
-        params=params,
-        headers=tronscan_headers(),
-        timeout=30,
-    ).get("token_transfers", [])
 
 
 # ============================================================
@@ -529,103 +495,114 @@ def save_pair(
 # PAIR QUALIFICATION
 # ============================================================
 def analyze_wallet(wallet_b, start_ms, end_ms):
-    all_history = []
-    offset = 0
-
-    while True:
-        try:
-            batch = get_usdt_transfers(
-                start_timestamp=start_ms,
-                end_timestamp=end_ms,
-                start=offset,
-                limit=50,
-            )
-
-        except Exception as exc:
-            log.warning(
-                "Could not fetch transfers for wallet %s: %s",
-                wallet_b,
-                exc
-            )
-            break
-
-        if not batch:
-            break
-
-        all_history.extend(batch)
-
-        log.info(
-            "Wallet %s analysis batch: %s transfers",
-            wallet_b,
-            len(batch)
-        )
-
-        offset += len(batch)
-
-        if len(batch) < 50:
-            break
-
-        time.sleep(0.2)
-
     by_sender = defaultdict(list)
 
-    for tx in all_history:
-        if tx.get("to_address") != wallet_b:
-            continue
+    offset = 0
+    page_size = 50
+    seen_txids = set()
 
-        from_address = tx.get("from_address")
+    while True:
+        history = get_wallet_history(
+            wallet_b,
+            limit=page_size,
+            start=offset,
+        )
 
-        if not from_address:
-            continue
+        if not history:
+            break
 
-        amount = transfer_amount(tx)
+        log.info(
+            "Wallet %s analysis batch: %s transfers (offset %s)",
+            wallet_b,
+            len(history),
+            offset,
+        )
 
-        if amount <= MIN_TRANSFER_USD:
-            continue
+        new_transactions = 0
+        oldest_timestamp = None
 
-        timestamp = transaction_timestamp(tx)
-
-        if timestamp:
-            if timestamp < start_ms or timestamp > end_ms:
-                continue
-
-        by_sender[from_address].append({
-            "amount": amount,
-            "timestamp": timestamp,
-            "tag": get_tag_name(tx),
-            "txid": (
+        for tx in history:
+            txid = (
                 tx.get("hash")
                 or tx.get("transaction_id")
                 or tx.get("txID")
                 or ""
-            ),
-        })
+            )
+
+            # Prevent an API pagination failure from creating an infinite loop.
+            if txid and txid in seen_txids:
+                continue
+
+            if txid:
+                seen_txids.add(txid)
+
+            new_transactions += 1
+
+            if tx.get("to_address") != wallet_b:
+                continue
+
+            from_address = tx.get("from_address")
+            if not from_address:
+                continue
+
+            amount = transfer_amount(tx)
+            if amount <= MIN_TRANSFER_USD:
+                continue
+
+            timestamp = transaction_timestamp(tx)
+
+            if timestamp:
+                if oldest_timestamp is None:
+                    oldest_timestamp = timestamp
+                else:
+                    oldest_timestamp = min(oldest_timestamp, timestamp)
+
+                if timestamp < start_ms or timestamp > end_ms:
+                    continue
+
+            by_sender[from_address].append({
+                "amount": amount,
+                "timestamp": timestamp,
+                "tag": get_tag_name(tx),
+                "txid": txid,
+            })
+
+        # If the API gives us the same page again, stop safely.
+        if new_transactions == 0:
+            log.warning(
+                "Wallet %s pagination stopped: no new transactions.",
+                wallet_b,
+            )
+            break
+
+        # We are sorted newest → oldest. Once the oldest transaction
+        # reaches the beginning of our requested period, we're done.
+        if oldest_timestamp is not None and oldest_timestamp <= start_ms:
+            break
+
+        offset += len(history)
+
+        # TronScan is returning 50 per page in this setup.
+        # A smaller page means there is probably nothing else to fetch.
+        if len(history) < page_size:
+            break
+
+        time.sleep(0.2)
 
     qualified = []
 
     for wallet_a, transactions in by_sender.items():
-
         if len(transactions) < 2:
             continue
 
-        tags = [
-            tx["tag"]
-            for tx in transactions
-            if tx["tag"]
-        ]
-
+        tags = [tx["tag"] for tx in transactions if tx["tag"]]
         tag_name = tags[0] if tags else ""
 
         is_cex, cex_name = detect_cex(tag_name)
-
         if not is_cex:
             continue
 
-        total = sum(
-            tx["amount"]
-            for tx in transactions
-        )
-
+        total = sum(tx["amount"] for tx in transactions)
         balance = get_usdt_balance(wallet_a)
 
         qualified.append({
@@ -638,9 +615,6 @@ def analyze_wallet(wallet_b, start_ms, end_ms):
         })
 
     return qualified
-
-
-
 # ============================================================
 # NEW PAIR ALERT
 # ============================================================
